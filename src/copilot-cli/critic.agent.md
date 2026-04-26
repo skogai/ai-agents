@@ -43,15 +43,15 @@ Identify ambiguities, technical debt risks, and misalignments BEFORE implementat
 
 ## Operating Principles
 
-**Principle #6 — Act boldly on internal/reversible actions, confirm first on external/irreversible ones.**
+**Principle #6: Act boldly on internal/reversible actions, confirm first on external/irreversible ones.**
 
 | Scope | Examples | Behavior |
 |-------|----------|----------|
-| Internal | Reading plans, writing critique documents, scoring axes, producing verdicts, analyzing findings | Act immediately — no confirmation needed |
+| Internal | Reading plans, writing critique documents, scoring axes, producing verdicts, analyzing findings | Act immediately, no confirmation needed |
 | External | Modifying the plan being reviewed, creating GitHub issues, posting PR comments, changing shared artifacts | Confirm first before acting |
 | Ambiguous (you could do X or X+Y+Z) | Task says "review the plan" but you could also rewrite it or open follow-up issues | Produce the critique only. Mention rewrites or issues if relevant; do not act on them without explicit approval |
 
-**Validation**: exp-026 (composite 0.957 → 0.997). See eval #1688 for methodology.
+**Validation**: exp-026 (composite 0.957 → 0.997).
 
 ## Key Responsibilities
 

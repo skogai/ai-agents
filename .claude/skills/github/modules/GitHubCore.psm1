@@ -540,7 +540,7 @@ function Get-AllPRsWithComments {
         Only include PRs updated since this date.
 
     .PARAMETER MaxPages
-        Maximum number of pagination pages. Default: 50.
+        Maximum number of pagination pages. Default: 50. Must be >= 1.
 
     .OUTPUTS
         Array of PR objects with review thread data. Each PR includes:
@@ -621,6 +621,9 @@ query($owner: String!, $repo: String!, $cursor: String) {
         }
 
         $result = Invoke-GhGraphQL -Query $query -Variables $variables
+        if ($null -eq $result -or $null -eq $result.repository -or $null -eq $result.repository.pullRequests) {
+            throw "GraphQL query for pullRequests returned no data (page $pageCount). The repository may be unreachable, the API hit a rate/resource limit, or auth is invalid."
+        }
         $prData = $result.repository.pullRequests
 
         foreach ($pr in $prData.nodes) {

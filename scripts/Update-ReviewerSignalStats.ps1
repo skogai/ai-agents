@@ -269,6 +269,7 @@ function Get-AllPRsWithCommentsLocal {
         [datetime]$Since,
 
         [Parameter()]
+        [ValidateRange(1, 1000)]
         [int]$MaxPages = 50
     )
 
