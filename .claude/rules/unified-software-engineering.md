@@ -5,7 +5,7 @@ alwaysApply: false
 
 # Unified Software Engineering
 
-This rule resolves conflicts between engineering principles models already know (Clean Code, DDD, Refactoring, Pragmatic Programmer, Code Complete) so that contradictions do not produce inconsistent agent behavior. Use it as a tiebreaker and as a concrete blocklist when reviewing or generating code.
+This rule resolves conflicts between engineering principles that models already know (Clean Code, DDD, Refactoring, Pragmatic Programmer, Code Complete) so that contradictions do not produce inconsistent agent behavior. Use it as a tiebreaker and as a concrete blocklist when reviewing or generating code.
 
 Cherry-picked from [agent-rules-books](https://github.com/ciembor/agent-rules-books) (MIT). The full upstream document is intentionally not imported. Adding the entire 46KB rule set duplicates content already known to the model and degrades response quality.
 
@@ -93,7 +93,7 @@ Do not silently broaden scope beyond the task.
 
 ## Forbidden Patterns
 
-Do not generate or preserve these patterns unless explicitly required and justified in the PR description.
+Do not generate these patterns unless explicitly required and justified in the PR description. When you encounter these patterns in code you are not actively touching, leave them alone unless removing them is part of the task; track separately rather than expand scope.
 
 ### Complexity and Design
 
