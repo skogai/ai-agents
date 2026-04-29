@@ -135,3 +135,123 @@ class TestValidateWithFixtures:
             "validate_marketplace_counts.MARKETPLACE_JSON", marketplace
         )
         assert validate(fix=False) == 2
+
+
+class TestZeroEditExtensibility:
+    """REQ-003-004: adding a new plugin must require ZERO Python edits.
+
+    Builds a temporary marketplace.json + marketplace-counters.yaml + a
+    fake source tree, then runs validate() pointed at them. No code in
+    build/scripts/ is touched, proving the mapping is config-only.
+    """
+
+    def test_new_plugin_validates_without_python_changes(
+        self, tmp_path: Path
+    ) -> None:
+        # Fake source tree: 4 .md agents under <repo>/fake-plugin-src.
+        src = tmp_path / "fake-plugin-src"
+        src.mkdir()
+        for name in ["one.md", "two.md", "three.md", "four.md"]:
+            (src / name).write_text("agent body\n")
+        # README.md should be excluded so we still count 4.
+        (src / "README.md").write_text("docs\n")
+
+        # New plugin counter config (uses existing md_agents strategy).
+        counters_yaml = tmp_path / "marketplace-counters.yaml"
+        counters_yaml.write_text(
+            'schemaVersion: "1.0"\n'
+            "plugins:\n"
+            "  fresh-plugin:\n"
+            "    agent:\n"
+            '      strategy: "md_agents"\n'
+            '      sourceDir: "fake-plugin-src"\n'
+            '      exclude: ["README.md"]\n'
+        )
+
+        # Marketplace.json with description containing the count token.
+        marketplace = tmp_path / "marketplace.json"
+        marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "name": "fresh-plugin",
+                            "description": "4 agents in a brand-new plugin",
+                            "source": "./fake-plugin-src",
+                        }
+                    ]
+                }
+            )
+        )
+
+        # Validate: returns 0 with no Python edits required.
+        assert (
+            validate(
+                fix=False,
+                counters_path=counters_yaml,
+                marketplace_path=marketplace,
+                repo_root=tmp_path,
+            )
+            == 0
+        )
+
+    def test_unknown_strategy_in_config_returns_error(
+        self, tmp_path: Path
+    ) -> None:
+        counters_yaml = tmp_path / "marketplace-counters.yaml"
+        counters_yaml.write_text(
+            'schemaVersion: "1.0"\n'
+            "plugins:\n"
+            "  bad:\n"
+            "    agent:\n"
+            '      strategy: "no_such_strategy"\n'
+            '      sourceDir: "."\n'
+        )
+        marketplace = tmp_path / "marketplace.json"
+        marketplace.write_text(json.dumps({"plugins": []}))
+        assert (
+            validate(
+                fix=False,
+                counters_path=counters_yaml,
+                marketplace_path=marketplace,
+                repo_root=tmp_path,
+            )
+            == 2
+        )
+
+    def test_stale_count_in_new_plugin_detected(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "only.md").write_text("body\n")
+
+        counters_yaml = tmp_path / "marketplace-counters.yaml"
+        counters_yaml.write_text(
+            'schemaVersion: "1.0"\n'
+            "plugins:\n"
+            "  test-plugin:\n"
+            "    agent:\n"
+            '      strategy: "md_agents"\n'
+            '      sourceDir: "src"\n'
+        )
+        marketplace = tmp_path / "marketplace.json"
+        marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "name": "test-plugin",
+                            "description": "999 agents (stale)",
+                        }
+                    ]
+                }
+            )
+        )
+        assert (
+            validate(
+                fix=False,
+                counters_path=counters_yaml,
+                marketplace_path=marketplace,
+                repo_root=tmp_path,
+            )
+            == 1
+        )
