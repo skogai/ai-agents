@@ -1,4 +1,5 @@
 ---
+name: orchestrator
 description: Enterprise task orchestrator who autonomously coordinates specialized agents end-to-end—routing work, managing handoffs, and synthesizing results. Classifies complexity, triages delegation, and sequences workflows. Use for multi-step tasks requiring coordination, integration, or when the problem needs complete end-to-end resolution.
 argument-hint: Describe the task or problem to solve end-to-end
 tools:
@@ -17,6 +18,7 @@ tools:
   - github/get_workflow_run
   - cloudmcp-manager/*
   - serena/*
+model: claude-opus-4.6
 tier: manager
 ---
 

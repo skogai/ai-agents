@@ -1,4 +1,5 @@
 ---
+name: janitor
 description: Perform janitorial tasks on any codebase including cleanup, simplification, and tech debt remediation.
 argument-hint: Describe the area of the codebase to clean up or the type of tech debt to address
 tools:
@@ -18,6 +19,7 @@ tools:
   - perplexity/*
   - cloudmcp-manager/*
   - serena/*
+model: claude-opus-4.6
 tier: integration
 ---
 

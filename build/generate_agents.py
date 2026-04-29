@@ -82,7 +82,12 @@ def read_artifacts_stanza(config_path: Path, artifact: str) -> dict[str, object]
 def read_platform_config(config_path: Path) -> dict[str, object] | None:
     """Read platform configuration from a YAML file.
 
-    Parses simple YAML with top-level keys and nested sections.
+    Parses simple YAML with top-level keys, nested sections, and two-level nesting.
+    Supports structures like:
+        legacy:
+          frontmatter:
+            model: "..."
+            includeNameField: true
     """
     if not config_path.exists():
         print(f"Error: Platform config not found: {config_path}", file=sys.stderr)
@@ -91,27 +96,50 @@ def read_platform_config(config_path: Path) -> dict[str, object] | None:
     content = config_path.read_text(encoding="utf-8")
     config: dict[str, object] = {}
     current_section: str | None = None
+    current_subsection: str | None = None
 
     for line in re.split(r"\r?\n", content):
         if re.match(r"^\s*#", line) or not line.strip():
             continue
 
-        # Section header (key with no value)
+        # Section header (key with no value, no indent)
         section_match = re.match(r"^(\w+):\s*$", line)
         if section_match:
             current_section = section_match.group(1)
+            current_subsection = None
             config[current_section] = {}
             continue
 
-        # Nested key-value (indented)
-        nested_match = re.match(r"^\s+(\w+):\s*(.*)$", line)
-        if nested_match:
+        # Subsection header (2-space indent, key with no value) - two-level nesting
+        subsection_match = re.match(r"^  (\w+):\s*$", line)
+        if subsection_match and current_section:
+            current_subsection = subsection_match.group(1)
+            section_value = config.get(current_section)
+            if isinstance(section_value, dict):
+                section_value[current_subsection] = {}
+            continue
+
+        # Deeply nested key-value (4-space indent) - belongs to subsection
+        deep_nested_match = re.match(r"^    (\w+):\s*(.+)$", line)
+        if deep_nested_match and current_section and current_subsection:
+            key = deep_nested_match.group(1)
+            value = _parse_yaml_value(deep_nested_match.group(2).strip())
+            section_value = config.get(current_section)
+            if isinstance(section_value, dict):
+                subsection_value = section_value.get(current_subsection)
+                if isinstance(subsection_value, dict):
+                    subsection_value[key] = value
+            continue
+
+        # Nested key-value (2-space indent with value) - belongs to section
+        nested_match = re.match(r"^  (\w+):\s*(.+)$", line)
+        if nested_match and current_section:
+            current_subsection = None
             key = nested_match.group(1)
             value = _parse_yaml_value(nested_match.group(2).strip())
-            if current_section:
-                section_value = config.get(current_section)
-                if isinstance(section_value, dict):
-                    section_value[key] = value
+            section_value = config.get(current_section)
+            if isinstance(section_value, dict):
+                section_value[key] = value
             continue
 
         # Top-level key-value
@@ -121,6 +149,7 @@ def read_platform_config(config_path: Path) -> dict[str, object] | None:
             value = _parse_yaml_value(top_match.group(2).strip())
             config[key] = value
             current_section = None
+            current_subsection = None
 
     return config
 

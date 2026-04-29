@@ -20,6 +20,7 @@ tools:
   - cloudmcp-manager/*
   - serena/*
   - memory
+model: Claude Opus 4.6 (copilot)
 tier: builder
 ---
 
