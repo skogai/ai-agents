@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """Generate ``.github/instructions/`` rule files from ``.claude/rules/`` (REQ-003-006).
 
-Reads ``artifacts.rules`` from a platform YAML and rewrites every
-path-scoped Claude rule into a Copilot-compatible instruction file.
-Universal rules (no path scope) are gated by an explicit severity
-contract so customers do not silently get repository-wide instructions.
+Reads ``artifacts.rules`` from a platform YAML and rewrites every Claude
+rule into a Copilot-compatible instruction file. Rules are universal
+across providers; unscoped rules emit with ``applyTo: "**"`` (the
+universal-scope default).
 
-Per-rule logic:
+Per-rule logic (Round 3 amendment, 2026-04-29):
 
 1. Read source ``.claude/rules/<name>.md`` (frontmatter + body).
-2. Detect path scope: any of ``paths:``, ``applyTo:``, ``globs:``.
-3. If scoped → emit to ``.github/instructions/<name>.instructions.md``:
+2. Emit to ``.github/instructions/<name>.instructions.md``:
    - rename ``paths:`` to ``applyTo:`` (verbatim value)
    - drop ``alwaysApply:`` and ``priority:``
    - preserve ``description:`` and other unrelated keys
+   - if neither ``paths:`` nor ``applyTo:`` is declared, synthesize
+     ``applyTo: "**"`` (universal scope, the default for unscoped rules)
    - body unchanged
-4. If unscoped → consult ``severity:``:
-   - ``high`` → exit 1 (must declare scope or downgrade severity)
-   - ``medium`` → skip with WARN
-   - ``low`` → silent skip
-   - unset + governance keyword in body (``secret``, ``credential``,
-     ``license``, ``GP-001``..``GP-008``) → treat as ``high`` (exit 1)
-   - unset + no keyword → treat as ``medium`` (skip + WARN)
-5. NO-REGEN sentinel honored on the target file.
+3. NO-REGEN sentinel honored on the target file.
+
+The Round 2 severity-gate (high/medium/low + governance-keyword scan +
+conditional skip) was removed. Rationale: rules are universal across
+Claude and Copilot; there is no use case for Claude-only or Copilot-only
+rules. A rule exists in ``.claude/rules/`` → it ships.
 
 EXIT CODES:
-  0 - success (with possible WARN/silent skips)
-  1 - high-severity rule lacks path scope (operator must fix the rule)
+  0 - success
+  1 - sourceDir missing OR no rule files found
   2 - configuration error (config/stanza missing, traversal, etc.)
 
 Per ADR-035 Exit Code Standardization.
@@ -35,7 +34,6 @@ Per ADR-035 Exit Code Standardization.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -60,15 +58,7 @@ from generate_agents_common import (  # noqa: E402
 _DEFAULT_SOURCE_SUFFIX = ".md"
 _DEFAULT_OUTPUT_SUFFIX = ".instructions.md"
 _SCOPE_KEYS = ("paths", "applyTo", "globs")
-# Match the keyword anywhere in a word boundary on the leading side so
-# plural and possessive forms (`secrets`, `credentials`, `licenses`) also
-# escalate. The trailing side intentionally does not require a boundary
-# because suffixed forms still encode the same governance concern.
-_GOVERNANCE_PATTERN = re.compile(
-    r"\b(secret|credential|license|GP-00[1-8])",
-    re.IGNORECASE,
-)
-_VALID_SEVERITIES = {"high", "medium", "low"}
+_UNIVERSAL_SCOPE = "**"
 
 
 class GenerateRulesError(Exception):
@@ -80,7 +70,7 @@ class RuleAuditEntry:
     """One rule's outcome — used by tests to assert audit messaging."""
 
     name: str
-    action: str  # "emitted" | "warn-skipped" | "silent-skipped" | "high-error"
+    action: str  # "emitted" | "sentinel-skipped"
     reason: str = ""
 
 
@@ -93,9 +83,6 @@ class GenerateRulesResult:
     """
 
     written: int = 0
-    skipped_warn: int = 0
-    skipped_silent: int = 0
-    high_severity_errors: list[str] = field(default_factory=list)
     sentinel_skipped: int = 0
     entries: list[RuleAuditEntry] = field(default_factory=list)
 
@@ -125,42 +112,29 @@ def _has_path_scope(frontmatter: dict[str, str | None]) -> bool:
     return False
 
 
-def _classify_unscoped_severity(
-    frontmatter: dict[str, str | None], body: str
-) -> str:
-    """Classify the effective severity for an unscoped rule.
-
-    Returns one of {"high", "medium", "low"}. The ``severity:`` key wins
-    when set; otherwise the body is scanned for governance keywords. The
-    unset-and-no-keyword default is ``medium`` (skip + WARN), per spec.
-    """
-    raw = frontmatter.get("severity")
-    if isinstance(raw, str):
-        sev = raw.strip().lower()
-        if sev in _VALID_SEVERITIES:
-            return sev
-    # Unset (or invalid). Inspect body.
-    if _GOVERNANCE_PATTERN.search(body):
-        return "high"
-    return "medium"
-
-
 def _remap_frontmatter(
     frontmatter: dict[str, str | None],
     remap: dict[str, str],
     drop: set[str],
 ) -> dict[str, str | None]:
-    """Apply ``frontmatterRemap`` and ``frontmatterDrop`` rules.
+    """Apply ``frontmatterRemap`` and ``frontmatterDrop`` rules; ensure
+    the output declares ``applyTo`` (synthesizing universal scope when
+    the source rule has no path scope).
 
     Iteration order is preserved so the output diff is stable. Drop wins
     over remap: a key listed in both is removed, not renamed.
     """
+    had_scope = _has_path_scope(frontmatter)
     result: dict[str, str | None] = {}
     for key, value in frontmatter.items():
         if key in drop:
             continue
         new_key = remap.get(key, key)
         result[new_key] = value
+    if not had_scope and "applyTo" not in result:
+        # Universal-scope default for unscoped rules. Insert at the top
+        # of the output frontmatter for consistent placement.
+        result = {"applyTo": _UNIVERSAL_SCOPE, **result}
     return result
 
 
@@ -211,11 +185,11 @@ def _process_rule(
     drop: set[str],
     what_if: bool,
 ) -> tuple[str, str, str]:
-    """Process one rule.
+    """Process one rule. Round 3: every rule emits.
 
     Returns a tuple of ``(action, name, reason)`` where action is one of
-    ``emitted``, ``warn-skipped``, ``silent-skipped``, ``high-error``,
-    ``sentinel-skipped``. ``reason`` is empty unless skipping/erroring.
+    ``emitted`` or ``sentinel-skipped``. Unscoped rules receive a
+    synthesized ``applyTo: "**"`` (universal scope) via ``_remap_frontmatter``.
     """
     name = src_path.name[: -len(source_suffix)] if src_path.name.endswith(source_suffix) else src_path.stem
     text = src_path.read_text(encoding="utf-8")
@@ -227,25 +201,6 @@ def _process_rule(
         source_fm = parse_simple_frontmatter(match["frontmatter_raw"])
         body = match["body"]
 
-    if not _has_path_scope(source_fm):
-        sev = _classify_unscoped_severity(source_fm, body)
-        if sev == "high":
-            reason = (
-                f"rule '{name}' has no path scope and severity=high; "
-                "either add paths/applyTo OR explicitly downgrade severity"
-            )
-            return ("high-error", name, reason)
-        if sev == "medium":
-            reason = (
-                f"rule '{name}' has no path scope; severity=medium → skipped "
-                "(declare paths/applyTo to emit)"
-            )
-            print(f"  WARN: {reason}", file=sys.stderr)
-            return ("warn-skipped", name, reason)
-        # low → silent skip
-        return ("silent-skipped", name, "")
-
-    # Scoped: emit.
     target_name = f"{name}{output_suffix}"
     target = output_dir / target_name
     transformed = _remap_frontmatter(source_fm, remap, drop)
@@ -355,14 +310,8 @@ def generate_rules(
         result.entries.append(RuleAuditEntry(name=name, action=action, reason=reason))
         if action == "emitted":
             result.written += 1
-        elif action == "warn-skipped":
-            result.skipped_warn += 1
-        elif action == "silent-skipped":
-            result.skipped_silent += 1
         elif action == "sentinel-skipped":
             result.sentinel_skipped += 1
-        elif action == "high-error":
-            result.high_severity_errors.append(reason)
 
     duration = time.monotonic() - start
 
@@ -370,19 +319,8 @@ def generate_rules(
     print("=== Summary ===")
     print(f"Duration: {duration:.2f}s")
     print(f"Written: {result.written}")
-    if result.skipped_warn:
-        print(f"Skipped (WARN, severity=medium): {result.skipped_warn}")
-    if result.skipped_silent:
-        print(f"Skipped (silent, severity=low): {result.skipped_silent}")
     if result.sentinel_skipped:
         print(f"Skipped (NO-REGEN sentinel): {result.sentinel_skipped}")
-
-    if result.high_severity_errors:
-        print()
-        print("=== High-severity rules without path scope ===", file=sys.stderr)
-        for msg in result.high_severity_errors:
-            print(f"  ERROR: {msg}", file=sys.stderr)
-        return 1, result
 
     return 0, result
 

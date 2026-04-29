@@ -186,10 +186,7 @@ def _build_rules(repo_root: Path, config_path: Path, platform: str) -> Generator
     if src.is_dir():
         result.inputs = sum(1 for _ in src.glob("*.md"))
     result.outputs = run_result.written
-    result.skipped = run_result.skipped_warn + run_result.skipped_silent + run_result.sentinel_skipped
-    for entry in run_result.entries:
-        if entry.action in ("warn-skipped", "high-error") and entry.reason:
-            result.notices.append(entry.reason)
+    result.skipped = run_result.sentinel_skipped
     return result
 
 

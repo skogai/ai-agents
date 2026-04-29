@@ -67,7 +67,6 @@ RULES_KEYS = {
     "outputSuffix",
     "frontmatterRemap",
     "frontmatterDrop",
-    "skipIfNoPathScope",
 }
 HOOKS_KEYS = {
     "settingsSource",
