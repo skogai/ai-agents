@@ -167,7 +167,7 @@ Verification (per-artifact, not universal):
 | agents | Output count under `src/copilot-cli/agents/*.agent.md` equals source count under `.claude/agents/*.md` |
 | skills | Output count under `src/copilot-cli/skills/*/SKILL.md` equals source count under `.claude/skills/*/SKILL.md` |
 | commands | Output count under `src/copilot-cli/skills/<name>/SKILL.md` (with `user-invocable: true`) equals source count under `.claude/commands/*.md` |
-| rules | Output count under `.github/instructions/*.instructions.md` equals source count under `.claude/rules/*.md` minus rules with no path scope |
+| rules | Output count under `.github/instructions/*.instructions.md` equals source count under `.claude/rules/*.md` (unscoped rules emit with `applyTo: "**"`) |
 | hooks | Output `src/copilot-cli/hooks/hooks.json` contains exactly one event-key per Copilot-supported Claude event (per mapping in `templates/platforms/copilot-cli.yaml`); per-event entry count equals number of Claude scripts mapped to that event minus matcher-only entries that filter out at runtime |
 
 **REQ-003-002 — `templates/platforms/copilot-cli.yaml` schema (locked, versioned)**
@@ -203,7 +203,6 @@ artifacts:
     frontmatterDrop:
       - alwaysApply
       - priority
-    skipIfNoPathScope: true        # D8
   hooks:
     settingsSource: ".claude/settings.json"
     scriptSource: ".claude/hooks"
@@ -267,25 +266,15 @@ When any file under `.claude/<artifact>/` or `.claude/settings.json` changes, th
 
 Verification: pre-commit hook OR CI step runs `python3 build/build_all.py --check` and fails on staleness.
 
-**REQ-003-006 — Frontmatter remap for rules → instructions (D8 conditional)**
-When `.claude/rules/<name>.md` declares a `paths:` frontmatter key OR an `applyTo:` key already, the rule generator shall:
-- emit `.github/instructions/<name>.instructions.md`,
-- normalize frontmatter so the scoping key is `applyTo:`,
-- preserve `description:` verbatim,
-- drop `alwaysApply:` and `priority:` (Claude-only) with one-line WARN per file,
-- preserve body content verbatim.
+**REQ-003-006 — Frontmatter remap for rules → instructions**
 
-When the source rule has NEITHER `paths:` NOR `applyTo:` (a "universal" rule), the generator shall consult the rule's `severity:` frontmatter key:
+For each `.claude/rules/<name>.md`:
+- If frontmatter has `paths:` or `applyTo:`, emit `.github/instructions/<name>.instructions.md` with frontmatter normalized: scoping key becomes `applyTo:`, `alwaysApply` and `priority` dropped, all other keys preserved verbatim, body unchanged.
+- If frontmatter has neither `paths:` nor `applyTo:`, emit with synthesized `applyTo: "**"` (universal scope is the default for unscoped rules).
 
-- **`severity: high`** (or unset, when content includes governance keywords like "secret", "credential", "license", "GP-001..GP-008") → generator shall **exit 1** (build fails) with a message instructing the author to either add a path scope OR explicitly downgrade severity. This prevents critical universal guidance from being silently dropped from Copilot output.
-- **`severity: medium`** → generator shall skip the rule, emit a WARN to `GENERATION-AUDIT.md`, and continue. The build passes but the audit log surfaces the gap.
-- **`severity: low`** → generator shall skip the rule silently. Use only for advisory-only rules that have no operational impact.
+Rationale (Round 3 amendment): rules are universal across providers; there is no use case for Claude-only or Copilot-only rules. Severity field, governance-keyword scan, and conditional skip logic from earlier rounds are removed as unnecessary complication. A rule exists in `.claude/rules/` → it ships to `.github/instructions/`.
 
-Authors add `severity:` to `.claude/rules/<name>.md` frontmatter as opt-in escalation. The `severity:` key is a Claude-only frontmatter extension (dropped from any output that does ship).
-
-Verification: round-trip a fixture rule with `paths:` → output frontmatter has `applyTo:`; round-trip a fixture without scope and `severity: high` → generator exits 1; round-trip a fixture without scope and `severity: medium` → no output, WARN in audit log, exit 0; diff against expected snapshots is clean.
-
-Verification: round-trip a fixture rule with `paths:` → output frontmatter has `applyTo:`; round-trip a fixture without scope → no output, NOTICE printed; diff against expected snapshots is clean.
+Verification: round-trip a fixture rule with `paths:` → output frontmatter has `applyTo:`; round-trip a fixture without scope → output has `applyTo: "**"`; existing rules generate without errors.
 
 ### State-driven
 
@@ -347,7 +336,7 @@ The generator's NOTICE/WARN audit shall be written to `build/audit/GENERATION-AU
 
 **Bounded content scope** — the audit MUST contain ONLY:
 - Event names dropped per D5 / `eventDrop` (e.g., `SubagentStop`).
-- Rule filenames skipped per REQ-003-006, with severity tag.
+- Rules emitted per REQ-003-006 (every rule ships; no skip logic).
 - Matcher patterns translated to inline shims per REQ-003-007.
 - Per-artifact output counts (input → output transform summary).
 

@@ -414,3 +414,20 @@ This amendment does NOT permit:
 - Regression that motivated REQ-003: `.agents/incidents/2026-04-27-pir-plugin-manifest-schema-1773.md`
 - Existing build-pipeline YAML following the proposed pattern: `templates/platforms/{copilot-cli,visual-studio,vscode}.yaml`
 - Architect review: completed 2026-04-28; verdict APPROVE_WITH_CHANGES; all 10 revisions incorporated
+
+## Round 3 amendment-of-amendment (2026-04-29): rules severity gate removed
+
+Round 2 introduced a severity field (`high` / `medium` / `low`) on rules in `.claude/rules/`, with a governance-keyword scan that escalated unscoped rules mentioning `secret`, `credential`, `license`, or `GP-001..008` to high severity (build-failing). The intent was to prevent unscoped universal rules from silently shipping repository-wide instructions to Copilot.
+
+M4 implementation surfaced 11 unscoped rules in the live `.claude/rules/` corpus that all needed annotation. User feedback: "if we tripped over that many rules, the system is wrong, not the rules. Rules are universal — they're either a rule or not, with `applyTo` frontmatter or not."
+
+Reverting to a simpler default: rules are universal across providers; unscoped rules emit with synthesized `applyTo: "**"` (universal scope). Severity field, governance-keyword scan, conditional skip logic, and `skipIfNoPathScope` config flag are removed.
+
+Changes shipped:
+- REQ-003-006 spec section rewritten to two-bullet form
+- `templates/platforms/copilot-cli.yaml` `artifacts.rules.skipIfNoPathScope` key dropped
+- `build/scripts/validate_templates_schema.py` removes `skipIfNoPathScope` from RULES_KEYS
+- `build/scripts/generate_rules.py` simplified: severity dispatch + governance-keyword regex + 4-branch action enum (`emitted`/`warn-skipped`/`silent-skipped`/`high-error`) all removed; result enum collapses to 2 branches (`emitted`/`sentinel-skipped`)
+- Tests dropped: 5 severity-branch tests + 1 fixture; replaced with 3 tests proving universal-default emit and severity-as-data preservation
+
+ADR Conditions 6 and 7 (YAML `safe_load` mandate + pattern hardening for CWE-502/CWE-1333) are UNRELATED to rules severity and remain in force. They govern build-pipeline YAML config file safety, not rules generation.
