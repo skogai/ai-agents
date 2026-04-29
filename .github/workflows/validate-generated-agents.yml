@@ -53,6 +53,9 @@ jobs:
               - 'src/vs-code-agents/**'
               - 'src/copilot-cli/**'
               - 'build/generate_agents.py'
+              - 'build/scripts/**'
+              - '.claude/agents/**'
+              - '.claude/skills/**'
               - '.github/workflows/validate-generated-agents.yml'
 
       - name: Determine if validation should run
@@ -104,6 +107,15 @@ jobs:
         run: |
           echo "Running agent generation in validation mode..."
           python3 build/generate_agents.py --validate
+
+      - name: Build-all staleness check (REQ-003-005)
+        if: steps.should-run.outputs.skip != 'true'
+        # Run the M3 orchestrator in --check mode. Fails (exit 2) if any
+        # generator output is stale relative to the source. Catches the
+        # "forgot to regenerate skills/agents" class of error before merge.
+        run: |
+          echo "Running build_all.py --check..."
+          python3 build/scripts/build_all.py --check
 
       - name: Validate GitHub Actions SHA Pinning
         if: steps.should-run.outputs.skip != 'true'
