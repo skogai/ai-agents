@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
@@ -695,6 +695,162 @@ def _build_copilot_entry(
 # --- Driver ---------------------------------------------------------------
 
 
+def _iter_hooks(groups: list[Any]) -> "Iterable[tuple[dict[str, Any], dict[str, Any]]]":
+    """Yield ``(group, hook)`` pairs from a Claude-side groups list.
+
+    Skips entries that are not dicts (defensive against malformed
+    ``settings.json``); callers do not need to repeat the ``isinstance``
+    check.
+    """
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for hook in group.get("hooks", []) or []:
+            if not isinstance(hook, dict):
+                continue
+            yield group, hook
+
+
+def _handle_event_drop(
+    claude_event: str,
+    groups: list[Any],
+    *,
+    script_source: Path,
+    result: GenerateHooksResult,
+) -> None:
+    """Record an audit entry per hook for a Claude event in eventDrop."""
+    for group, hook in _iter_hooks(groups):
+        cmd = hook.get("command", "") or ""
+        src = _resolve_script_path(script_source, cmd, claude_event)
+        script_rel = (
+            str(src.relative_to(script_source))
+            if src is not None
+            else cmd or "<unknown>"
+        )
+        result.entries.append(
+            HookAuditEntry(
+                event_source=claude_event,
+                event_target="",
+                script=script_rel,
+                action="dropped",
+                matcher=group.get("matcher"),
+                reason=f"event '{claude_event}' in eventDrop",
+            )
+        )
+        result.dropped += 1
+        print(
+            f"  WARN: dropping {claude_event}/{script_rel} "
+            f"(event not supported by Copilot CLI)",
+            file=sys.stderr,
+        )
+
+
+def _handle_unknown_event(
+    claude_event: str,
+    groups: list[Any],
+    *,
+    result: GenerateHooksResult,
+) -> None:
+    """Record an audit entry per hook for a Claude event missing from eventRemap.
+
+    Operators can extend the remap config; we emit a WARN per hook
+    rather than crashing the build.
+    """
+    for group, hook in _iter_hooks(groups):
+        cmd = hook.get("command", "")
+        result.entries.append(
+            HookAuditEntry(
+                event_source=claude_event,
+                event_target="",
+                script=str(cmd) or "<unknown>",
+                action="dropped",
+                matcher=group.get("matcher"),
+                reason=f"event '{claude_event}' not in eventRemap",
+            )
+        )
+        result.dropped += 1
+        print(
+            f"  WARN: skipping unknown Claude event '{claude_event}' "
+            f"(not in eventRemap)",
+            file=sys.stderr,
+        )
+
+
+def _emit_one_hook(
+    *,
+    claude_event: str,
+    target_event: str,
+    group: dict[str, Any],
+    hook: dict[str, Any],
+    script_source: Path,
+    output_scripts: Path,
+    what_if: bool,
+    result: GenerateHooksResult,
+) -> tuple[str, dict[str, Any]] | None:
+    """Process one hook: resolve, copy (with shim), build the Copilot entry.
+
+    Returns ``(target_event, entry)`` when a Copilot entry should be
+    emitted (covers both newly-written and NO-REGEN-skipped cases),
+    or ``None`` when the hook is not a Python script under
+    ``.claude/hooks/`` (shell snippet skipped with NOTICE).
+    """
+    matcher = group.get("matcher")
+    cmd = hook.get("command", "") or ""
+    timeout = int(hook.get("timeout", _DEFAULT_TIMEOUT_SEC) or _DEFAULT_TIMEOUT_SEC)
+    src = _resolve_script_path(script_source, cmd, claude_event)
+    if src is None:
+        result.entries.append(
+            HookAuditEntry(
+                event_source=claude_event,
+                event_target=target_event,
+                script=cmd or "<empty>",
+                action="dropped",
+                matcher=matcher,
+                reason="not a Python script under .claude/hooks/",
+            )
+        )
+        result.dropped += 1
+        return None
+
+    script_rel = src.relative_to(script_source)
+    matcher_str = matcher if isinstance(matcher, str) and matcher else None
+    target = _relative_script_target(
+        output_scripts, target_event, src.name, matcher=matcher_str
+    )
+    script_name = target.name  # post-suffix name used by Copilot entry
+    written, reason = _copy_script(
+        src, target, matcher=matcher_str, what_if=what_if
+    )
+    entry = _build_copilot_entry(target_event, script_name, timeout_sec=timeout)
+    if not written:
+        # NO-REGEN: keep customer-owned script untouched but still emit
+        # the Copilot config entry (the whole point of NO-REGEN).
+        result.entries.append(
+            HookAuditEntry(
+                event_source=claude_event,
+                event_target=target_event,
+                script=str(script_rel),
+                action="sentinel-skipped",
+                matcher=matcher,
+                reason=reason,
+            )
+        )
+        result.sentinel_skipped += 1
+        return target_event, entry
+
+    result.entries.append(
+        HookAuditEntry(
+            event_source=claude_event,
+            event_target=target_event,
+            script=str(script_rel),
+            action="emitted",
+            matcher=matcher,
+        )
+    )
+    result.written += 1
+    return target_event, entry
+
+
 def _process_event(
     claude_event: str,
     groups: list[Any],
@@ -708,136 +864,37 @@ def _process_event(
 ) -> list[tuple[str, dict[str, Any]]]:
     """Process all entries for one Claude event.
 
-    Returns ``[(target_event, entry_dict), ...]`` for each emitted hook.
-    Side effects: copies scripts; appends to ``result.entries``.
+    Dispatches to one of three handlers based on the event's status:
+    drop (eventDrop), unknown (not in eventRemap), or emit (normal
+    path). Returns ``[(target_event, entry_dict), ...]`` for each
+    emitted hook. Side effects: copies scripts; appends to
+    ``result.entries``.
     """
     if claude_event in event_drop:
-        # Drop with WARN per script.
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            for hook in group.get("hooks", []) or []:
-                if not isinstance(hook, dict):
-                    continue
-                cmd = hook.get("command", "") or ""
-                src = _resolve_script_path(script_source, cmd, claude_event)
-                script_rel = (
-                    str(src.relative_to(script_source))
-                    if src is not None
-                    else cmd or "<unknown>"
-                )
-                result.entries.append(
-                    HookAuditEntry(
-                        event_source=claude_event,
-                        event_target="",
-                        script=script_rel,
-                        action="dropped",
-                        matcher=group.get("matcher"),
-                        reason=f"event '{claude_event}' in eventDrop",
-                    )
-                )
-                result.dropped += 1
-                print(
-                    f"  WARN: dropping {claude_event}/{script_rel} "
-                    f"(event not supported by Copilot CLI)",
-                    file=sys.stderr,
-                )
+        _handle_event_drop(
+            claude_event, groups, script_source=script_source, result=result
+        )
         return []
 
     target_event = event_remap.get(claude_event)
     if not target_event:
-        # Unknown event (not in remap and not in drop). Skip with WARN
-        # rather than crash; the operator can extend the remap config.
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            for hook in group.get("hooks", []) or []:
-                cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-                result.entries.append(
-                    HookAuditEntry(
-                        event_source=claude_event,
-                        event_target="",
-                        script=str(cmd) or "<unknown>",
-                        action="dropped",
-                        matcher=group.get("matcher"),
-                        reason=f"event '{claude_event}' not in eventRemap",
-                    )
-                )
-                result.dropped += 1
-                print(
-                    f"  WARN: skipping unknown Claude event '{claude_event}' "
-                    f"(not in eventRemap)",
-                    file=sys.stderr,
-                )
+        _handle_unknown_event(claude_event, groups, result=result)
         return []
 
     emitted: list[tuple[str, dict[str, Any]]] = []
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        matcher = group.get("matcher")
-        for hook in group.get("hooks", []) or []:
-            if not isinstance(hook, dict):
-                continue
-            cmd = hook.get("command", "") or ""
-            timeout = int(hook.get("timeout", _DEFAULT_TIMEOUT_SEC) or _DEFAULT_TIMEOUT_SEC)
-            src = _resolve_script_path(script_source, cmd, claude_event)
-            if src is None:
-                # Non-script command (shell snippet) — skip with NOTICE.
-                result.entries.append(
-                    HookAuditEntry(
-                        event_source=claude_event,
-                        event_target=target_event,
-                        script=cmd or "<empty>",
-                        action="dropped",
-                        matcher=matcher,
-                        reason="not a Python script under .claude/hooks/",
-                    )
-                )
-                result.dropped += 1
-                continue
-
-            script_rel = src.relative_to(script_source)
-            matcher_str = matcher if isinstance(matcher, str) and matcher else None
-            target = _relative_script_target(
-                output_scripts, target_event, src.name, matcher=matcher_str
-            )
-            script_name = target.name  # post-suffix name used by Copilot entry
-            written, reason = _copy_script(
-                src, target, matcher=matcher_str, what_if=what_if
-            )
-            if not written:
-                result.entries.append(
-                    HookAuditEntry(
-                        event_source=claude_event,
-                        event_target=target_event,
-                        script=str(script_rel),
-                        action="sentinel-skipped",
-                        matcher=matcher,
-                        reason=reason,
-                    )
-                )
-                result.sentinel_skipped += 1
-                # Still emit the Copilot config entry — the customer-owned
-                # script is the whole point of NO-REGEN.
-                entry = _build_copilot_entry(target_event, script_name, timeout_sec=timeout)
-                emitted.append((target_event, entry))
-                continue
-
-            entry = _build_copilot_entry(
-                target_event, script_name, timeout_sec=timeout
-            )
-            emitted.append((target_event, entry))
-            result.entries.append(
-                HookAuditEntry(
-                    event_source=claude_event,
-                    event_target=target_event,
-                    script=str(script_rel),
-                    action="emitted",
-                    matcher=matcher,
-                )
-            )
-            result.written += 1
+    for group, hook in _iter_hooks(groups):
+        item = _emit_one_hook(
+            claude_event=claude_event,
+            target_event=target_event,
+            group=group,
+            hook=hook,
+            script_source=script_source,
+            output_scripts=output_scripts,
+            what_if=what_if,
+            result=result,
+        )
+        if item is not None:
+            emitted.append(item)
     return emitted
 
 
