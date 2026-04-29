@@ -60,8 +60,12 @@ from generate_agents_common import (  # noqa: E402
 _DEFAULT_SOURCE_SUFFIX = ".md"
 _DEFAULT_OUTPUT_SUFFIX = ".instructions.md"
 _SCOPE_KEYS = ("paths", "applyTo", "globs")
+# Match the keyword anywhere in a word boundary on the leading side so
+# plural and possessive forms (`secrets`, `credentials`, `licenses`) also
+# escalate. The trailing side intentionally does not require a boundary
+# because suffixed forms still encode the same governance concern.
 _GOVERNANCE_PATTERN = re.compile(
-    r"\b(secret|credential|license|GP-00[1-8])\b",
+    r"\b(secret|credential|license|GP-00[1-8])",
     re.IGNORECASE,
 )
 _VALID_SEVERITIES = {"high", "medium", "low"}
@@ -174,6 +178,10 @@ def _write_instruction(
         return False
 
     fm_yaml = format_frontmatter_yaml(frontmatter) if frontmatter else ""
+    # format_frontmatter_yaml joins with "\n" without a trailing newline; add
+    # one so the closing fence does not run into the last key line.
+    if fm_yaml and not fm_yaml.endswith("\n"):
+        fm_yaml += "\n"
     if fm_yaml:
         content = f"---\n{fm_yaml}---\n{body}"
     else:

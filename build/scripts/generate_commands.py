@@ -187,8 +187,12 @@ def _write_skill(
         return False
 
     fm_yaml = format_frontmatter_yaml(frontmatter)
+    # format_frontmatter_yaml joins with "\n" and omits a trailing newline,
+    # so the closing fence needs one inserted before it; otherwise the
+    # output reads `last-key: value---` and breaks frontmatter parsing.
+    if fm_yaml and not fm_yaml.endswith("\n"):
+        fm_yaml += "\n"
     content = f"---\n{fm_yaml}---\n{body}"
-    # Ensure body terminates with newline for clean diffs.
     if not content.endswith("\n"):
         content += "\n"
 

@@ -319,3 +319,16 @@ def test_blocklist_pattern_at_line_start_rejects_audit(
     violations = build_all.write_audit(audit, audit_path, pats)
     assert violations
     assert not audit_path.exists()
+
+
+# M4: Commands + Rules generators wired into orchestrator -------------------
+
+
+def test_generators_registry_includes_m4_artifacts() -> None:
+    """commands and rules must be in the GENERATORS list (M4-T1, M4-T2)."""
+    artifact_names = [name for name, _ in build_all.GENERATORS]
+    assert "commands" in artifact_names
+    assert "rules" in artifact_names
+    # Order matters: agents first (runs once), then skills, commands, rules.
+    assert artifact_names.index("skills") < artifact_names.index("commands")
+    assert artifact_names.index("commands") < artifact_names.index("rules")
