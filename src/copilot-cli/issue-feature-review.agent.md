@@ -1,5 +1,4 @@
 ---
-name: issue-feature-review
 description: Review GitHub feature requests with constructive skepticism. Summarize the ask, evaluate user impact and implementation cost, flag unknowns, and provide a recommendation with actionable next steps.
 argument-hint: Provide the issue title, issue body, and any known repository context
 tools:
@@ -19,7 +18,6 @@ tools:
   - perplexity/*
   - cloudmcp-manager/*
   - serena/*
-model: claude-sonnet-4.6
 tier: manager
 ---
 

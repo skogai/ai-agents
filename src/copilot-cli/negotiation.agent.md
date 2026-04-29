@@ -1,5 +1,4 @@
 ---
-name: negotiation
 description: Negotiation specialist who analyzes offers, drafts counter-proposals, and surfaces deal intelligence using behavioral frameworks and agent-era research findings. Use when reviewing any offer (real estate, compensation, vendor contract, resource allocation) or when you need to detect information asymmetry, anchor manipulation, or value gaps.
 argument-hint: Paste the offer text or describe the negotiation situation
 tools:
@@ -12,7 +11,6 @@ tools:
   - perplexity/*
   - cloudmcp-manager/*
   - serena/*
-model: claude-opus-4.6
 tier: integration
 ---
 
