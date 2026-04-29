@@ -45,6 +45,7 @@ from generate_hooks import (  # noqa: E402
     is_shimmed,
     normalize_tool_args,
     strip_shim,
+    _matcher_suffix,
     _SHIM_BEGIN,
     _SHIM_END,
 )
@@ -639,6 +640,102 @@ def test_generator_distinct_shim_per_matcher(tmp_path: Path) -> None:
     out = json.loads((tmp_path / "out" / "hooks.json").read_text())
     bash_paths = {entry["bash"] for entry in out["hooks"]["preToolUse"]}
     assert len(bash_paths) == 2
+
+
+# --- _matcher_suffix collision prevention (P0) ---------------------------
+
+
+def test_matcher_suffix_deterministic_same_input():
+    """Same matcher must produce same suffix across calls (idempotency)."""
+    a = _matcher_suffix("Bash(git commit*)")
+    b = _matcher_suffix("Bash(git commit*)")
+    assert a == b
+    assert a  # non-empty
+
+
+def test_matcher_suffix_path_traversal_vs_absolute_distinct():
+    """Path-traversal and absolute-path matchers must NOT collide.
+
+    Both sanitize to ``Bash_etc_passwd``; the hash suffix prevents the
+    silent gate bypass where the second write would clobber the first.
+    """
+    a = _matcher_suffix("Bash(../../etc/passwd)")
+    b = _matcher_suffix("Bash(/etc/passwd)")
+    assert a != b
+
+
+def test_matcher_suffix_regex_inversion_distinct():
+    """Functionally-equivalent but textually-different regexes are distinct."""
+    a = _matcher_suffix("^(Edit|Write)$")
+    b = _matcher_suffix("^(Write|Edit)$")
+    assert a != b
+
+
+def test_matcher_suffix_long_matcher_unique():
+    """Matcher longer than 48-char sanitization boundary still unique."""
+    long_a = "Bash(" + "a" * 100 + ")"
+    long_b = "Bash(" + "a" * 99 + "b)"
+    a = _matcher_suffix(long_a)
+    b = _matcher_suffix(long_b)
+    # Both sanitized forms hit the 48-char cap and look identical without
+    # the hash; the hash differentiates them.
+    assert a != b
+
+
+def test_matcher_suffix_empty_returns_empty():
+    """None or empty matcher -> empty suffix (no shim file rename)."""
+    assert _matcher_suffix(None) == ""
+    assert _matcher_suffix("") == ""
+
+
+def test_matcher_suffix_unicode_does_not_crash():
+    """Unicode in matcher hashes cleanly without raising."""
+    # Sanitization strips to "_" so suffix is just the hash.
+    out = _matcher_suffix("Bash(café*)")
+    assert out  # non-empty
+    assert len(out) >= 6  # at least the hash
+
+
+def test_generator_collision_resistant_filenames(tmp_path: Path) -> None:
+    """Two functionally-equivalent regex matchers produce distinct files.
+
+    Regression for P0 collision bug: a sanitized-suffix scheme without
+    hashing would write both shimmed copies to the same path; the
+    second silently overwrites the first and only one matcher fires.
+    """
+    cfg = _write_config(tmp_path)
+    hooks_src = tmp_path / "hooks_src"
+    _write_script(hooks_src, "PostToolUse", "guard.py")
+    settings = tmp_path / "settings.json"
+    _write_settings(
+        settings,
+        {
+            "PostToolUse": [
+                {
+                    "matcher": "^(Edit|Write)$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 -u .claude/hooks/PostToolUse/guard.py",
+                        }
+                    ],
+                },
+                {
+                    "matcher": "^(Write|Edit)$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 -u .claude/hooks/PostToolUse/guard.py",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+    rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
+    assert rc == 0
+    targets = sorted((tmp_path / "out" / "postToolUse").glob("guard*.py"))
+    assert len(targets) == 2, f"expected 2 distinct files, got {targets}"
 
 
 # --- generator config errors (negative) ----------------------------------

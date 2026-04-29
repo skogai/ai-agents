@@ -24,6 +24,7 @@ Per ADR-035 Exit Code Standardization.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -564,14 +565,28 @@ def _resolve_script_path(
 
 
 def _matcher_suffix(matcher: str | None) -> str:
-    """Derive a filesystem-safe suffix from a matcher pattern.
+    """Derive a filesystem-safe, collision-free suffix from a matcher.
 
     A single source script registered under multiple matchers (e.g.
     ``invoke_session_log_guard.py`` against both ``Bash(git commit*)``
     and ``Bash(gh pr create*)``) must produce DIFFERENT shimmed copies
     on disk; otherwise the second copy clobbers the first and only one
-    matcher fires. The suffix encodes the matcher in a stable,
-    debuggable form.
+    matcher fires.
+
+    Naive sanitization (alnum -> ``_``) is NOT sufficient. Examples
+    where two distinct matchers collapse to the same sanitized form:
+
+    - ``Bash(../../etc/passwd)`` -> ``Bash_etc_passwd``
+    - ``Bash(/etc/passwd)`` -> ``Bash_etc_passwd``
+    - ``^(Edit|Write)$`` and ``^(Write|Edit)$`` differ in regex but
+      sanitize identically
+
+    To guarantee uniqueness we ALWAYS append a 6-character SHA-1 of the
+    original matcher. The hash is deterministic (same input -> same
+    suffix across runs), short enough to keep filenames readable, and
+    guarantees no two distinct matchers produce the same target path.
+    The cost (7 chars per filename) buys absolute determinism and
+    closes the silent-clobber gate-bypass class of bug.
     """
     if not matcher:
         return ""
@@ -579,7 +594,10 @@ def _matcher_suffix(matcher: str | None) -> str:
     sanitized = _re.sub(r"[^A-Za-z0-9]+", "_", matcher).strip("_")
     if len(sanitized) > 48:
         sanitized = sanitized[:48].rstrip("_")
-    return sanitized
+    digest = hashlib.sha1(matcher.encode("utf-8")).hexdigest()[:6]  # noqa: S324
+    if sanitized:
+        return f"{sanitized}_{digest}"
+    return digest
 
 
 def _relative_script_target(
