@@ -116,7 +116,10 @@ def _build_agents(repo_root: Path, _config_path: Path, _platform: str) -> Genera
     """
     import generate_agents
 
-    rc = generate_agents.main([])
+    rc = generate_agents.main([
+        "--templates-path", str(repo_root / "templates"),
+        "--output-root", str(repo_root / "src"),
+    ])
     return GeneratorResult(artifact="agents", platform="*", exit_code=rc)
 
 
