@@ -410,7 +410,14 @@ def run(
         sys.stdout.write(_format_audit_json(audit))
 
     if check:
-        diff = _git_diff_paths(repo_root)
+        # Limit staleness check to paths the generators actually own. Other
+        # working-tree drift (e.g. uv.lock) is the user's responsibility,
+        # not the build orchestrator's.
+        owned_prefixes = ("src/", ".github/instructions/")
+        diff = [
+            p for p in _git_diff_paths(repo_root)
+            if any(p.startswith(prefix) for prefix in owned_prefixes)
+        ]
         if diff:
             print("STALENESS DETECTED — uncommitted regen drift:", file=sys.stderr)
             for p in diff:
