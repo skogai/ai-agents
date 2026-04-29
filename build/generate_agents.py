@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 # Add build directory to path for imports
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
+sys.path.insert(0, str(_SCRIPT_DIR / "scripts"))
 
 from generate_agents_common import (  # noqa: E402
     convert_frontmatter_for_platform,
@@ -47,6 +48,34 @@ from generate_agents_common import (  # noqa: E402
     read_toolset_definitions,
     read_yaml_frontmatter,
 )
+from yaml_loader import ConfigError, load_platform_config  # noqa: E402
+
+
+def read_artifacts_stanza(config_path: Path, artifact: str) -> dict[str, object] | None:
+    """Read a single ``artifacts.<artifact>`` stanza via the shared loader.
+
+    The custom regex parser used by ``read_platform_config`` flattens nested
+    keys into the parent section. That works for one-level legacy blocks but
+    cannot represent the deeper ``artifacts.<artifact>.{key}`` shape REQ-003
+    introduces. This helper uses ``yaml_loader.load_platform_config`` to read
+    the YAML correctly under the same safety contract (safe_load, no anchors,
+    schemaVersion check).
+
+    Returns ``None`` if the file or stanza is absent, so the generator can
+    fall back to the legacy block.
+    """
+    if not config_path.exists():
+        return None
+    try:
+        cfg = load_platform_config(config_path)
+    except ConfigError as exc:
+        print(f"Warning: artifacts read failed for {config_path}: {exc}", file=sys.stderr)
+        return None
+    artifacts = cfg.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None
+    stanza = artifacts.get(artifact)
+    return stanza if isinstance(stanza, dict) else None
 
 
 def read_platform_config(config_path: Path) -> dict[str, object] | None:
@@ -134,6 +163,14 @@ def generate_agents(
         for config_file in sorted(platforms_path.glob("*.yaml")):
             config = read_platform_config(config_file)
             if config:
+                # REQ-003-001: Read the artifacts.agents stanza via the
+                # shared yaml_loader (proper YAML, anchor rejection, schema
+                # version check). Stash it under a private key for the loop
+                # below; legacy block still wins for output paths today to
+                # preserve current on-disk layout (REQ-003-010 no-regress).
+                stanza = read_artifacts_stanza(config_file, "agents")
+                if stanza is not None:
+                    config["__agents_stanza__"] = stanza
                 platforms.append(config)
 
     if not platforms:
@@ -179,12 +216,20 @@ def generate_agents(
         body = parsed["body"]
 
         for platform in platforms:
-            # Support both new schema (provider + legacy block) and old schema (platform + top-level keys)
+            # Support new schema (artifacts.agents stanza), legacy block, and old schema.
+            # Resolution order for output path/extension:
+            #   1. legacy.{outputDir,fileExtension}  (preserves on-disk layout)
+            #   2. artifacts.agents.{outputDir,outputSuffix} (REQ-003-001 schema)
+            #   3. platform top-level (oldest fallback)
             platform_name = str(platform.get("provider", platform.get("platform", "")))
-            
-            # Look for outputDir in legacy block first, then top-level for backward compat
             legacy = platform.get("legacy") if isinstance(platform.get("legacy"), dict) else {}
-            output_dir_relative = str(legacy.get("outputDir", platform.get("outputDir", "")))
+            stanza = platform.get("__agents_stanza__") if isinstance(platform.get("__agents_stanza__"), dict) else {}
+            output_dir_relative = str(
+                legacy.get(
+                    "outputDir",
+                    stanza.get("outputDir", platform.get("outputDir", "")),
+                )
+            )
 
             # Remove src/ prefix if present since output_root is already src/
             prefix_match = re.match(r"^src/(.*)$", output_dir_relative)
@@ -192,7 +237,12 @@ def generate_agents(
                 output_dir_relative = prefix_match.group(1)
 
             output_dir = output_root / output_dir_relative
-            file_ext = str(legacy.get("fileExtension", platform.get("fileExtension", ".md")))
+            file_ext = str(
+                legacy.get(
+                    "fileExtension",
+                    stanza.get("outputSuffix", platform.get("fileExtension", ".md")),
+                )
+            )
             output_file = output_dir / f"{agent_name}{file_ext}"
 
             # Security check
