@@ -552,12 +552,19 @@ def test_generator_emits_python3_and_py3_invocation(tmp_path: Path) -> None:
     assert entry["cwd"] == "."
 
 
+def _find_shimmed_alpha(tmp_path: Path) -> Path:
+    """Locate the shimmed copy of alpha.py (suffix encodes the matcher)."""
+    candidates = list((tmp_path / "out" / "preToolUse").glob("alpha*.py"))
+    assert len(candidates) == 1, f"expected 1 alpha shim, got {candidates}"
+    return candidates[0]
+
+
 def test_generator_writes_shim_into_copied_script(tmp_path: Path) -> None:
     """A matcher in the source must produce a shimmed copy on disk."""
     cfg, _ = _setup_full_fixture(tmp_path)
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 0
-    body = (tmp_path / "out" / "preToolUse" / "alpha.py").read_text()
+    body = _find_shimmed_alpha(tmp_path).read_text()
     assert _SHIM_BEGIN in body
     assert "_MATCHER" in body
 
@@ -565,9 +572,9 @@ def test_generator_writes_shim_into_copied_script(tmp_path: Path) -> None:
 def test_generator_idempotency_on_rerun(tmp_path: Path) -> None:
     cfg, _ = _setup_full_fixture(tmp_path)
     generate_hooks.generate_hooks(cfg, tmp_path)
-    first = (tmp_path / "out" / "preToolUse" / "alpha.py").read_text()
+    first = _find_shimmed_alpha(tmp_path).read_text()
     generate_hooks.generate_hooks(cfg, tmp_path)
-    second = (tmp_path / "out" / "preToolUse" / "alpha.py").read_text()
+    second = _find_shimmed_alpha(tmp_path).read_text()
     assert first == second
     assert second.count(_SHIM_BEGIN) == 1
 
@@ -576,12 +583,62 @@ def test_generator_no_regen_sentinel_skips_overwrite(tmp_path: Path) -> None:
     cfg, _ = _setup_full_fixture(tmp_path)
     # First run produces the file.
     generate_hooks.generate_hooks(cfg, tmp_path)
-    target = tmp_path / "out" / "preToolUse" / "alpha.py"
+    target = _find_shimmed_alpha(tmp_path)
     # Customer applies a NO-REGEN edit.
     target.write_text("# NO-REGEN\nprint('customer fix')\n", encoding="utf-8")
     # Re-run; file must be untouched.
     generate_hooks.generate_hooks(cfg, tmp_path)
     assert target.read_text().startswith("# NO-REGEN\n")
+
+
+def test_generator_distinct_shim_per_matcher(tmp_path: Path) -> None:
+    """Same source script under two matchers produces two distinct shimmed copies.
+
+    Regression for the bug where the second matcher silently clobbered the
+    first because both wrote to the same target filename.
+    """
+    cfg = _write_config(tmp_path)
+    hooks_src = tmp_path / "hooks_src"
+    _write_script(hooks_src, "PreToolUse", "guard.py")
+    settings = tmp_path / "settings.json"
+    _write_settings(
+        settings,
+        {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash(git commit*)",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 -u .claude/hooks/PreToolUse/guard.py",
+                        }
+                    ],
+                },
+                {
+                    "matcher": "Bash(gh pr create*)",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 -u .claude/hooks/PreToolUse/guard.py",
+                        }
+                    ],
+                },
+            ]
+        },
+    )
+    rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
+    assert rc == 0
+    targets = sorted((tmp_path / "out" / "preToolUse").glob("guard*.py"))
+    # Two distinct files, one per matcher.
+    assert len(targets) == 2
+    body0 = targets[0].read_text()
+    body1 = targets[1].read_text()
+    # Each carries a different matcher in its shim header.
+    assert ("Matcher: Bash(git commit*)" in body0) != ("Matcher: Bash(git commit*)" in body1)
+    # And hooks.json points at both distinct filenames.
+    out = json.loads((tmp_path / "out" / "hooks.json").read_text())
+    bash_paths = {entry["bash"] for entry in out["hooks"]["preToolUse"]}
+    assert len(bash_paths) == 2
 
 
 # --- generator config errors (negative) ----------------------------------

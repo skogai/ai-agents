@@ -563,9 +563,37 @@ def _resolve_script_path(
     return None
 
 
+def _matcher_suffix(matcher: str | None) -> str:
+    """Derive a filesystem-safe suffix from a matcher pattern.
+
+    A single source script registered under multiple matchers (e.g.
+    ``invoke_session_log_guard.py`` against both ``Bash(git commit*)``
+    and ``Bash(gh pr create*)``) must produce DIFFERENT shimmed copies
+    on disk; otherwise the second copy clobbers the first and only one
+    matcher fires. The suffix encodes the matcher in a stable,
+    debuggable form.
+    """
+    if not matcher:
+        return ""
+    # Sanitize: keep alnum + underscore; collapse runs; cap at 48 chars.
+    sanitized = _re.sub(r"[^A-Za-z0-9]+", "_", matcher).strip("_")
+    if len(sanitized) > 48:
+        sanitized = sanitized[:48].rstrip("_")
+    return sanitized
+
+
 def _relative_script_target(
-    target_root: Path, target_event: str, script_name: str
+    target_root: Path,
+    target_event: str,
+    script_name: str,
+    *,
+    matcher: str | None = None,
 ) -> Path:
+    if matcher:
+        suffix = _matcher_suffix(matcher)
+        if suffix and script_name.endswith(".py"):
+            stem = script_name[: -len(".py")]
+            return target_root / target_event / f"{stem}__{suffix}.py"
     return target_root / target_event / script_name
 
 
@@ -730,11 +758,11 @@ def _process_event(
                 continue
 
             script_rel = src.relative_to(script_source)
-            script_name = src.name
-            target = _relative_script_target(
-                output_scripts, target_event, script_name
-            )
             matcher_str = matcher if isinstance(matcher, str) and matcher else None
+            target = _relative_script_target(
+                output_scripts, target_event, src.name, matcher=matcher_str
+            )
+            script_name = target.name  # post-suffix name used by Copilot entry
             written, reason = _copy_script(
                 src, target, matcher=matcher_str, what_if=what_if
             )
