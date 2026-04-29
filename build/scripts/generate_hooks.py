@@ -153,7 +153,7 @@ def _shim_classify(pattern):
 def _shim_normalize_args(tool_args):
     r"""Stringify and whitespace-normalize toolArgs for fnmatch comparison.
 
-    REQ-003-007: collapse \s+ to a single space and strip ends. Pattern
+    REQ-003-007: collapse \\s+ to a single space and strip ends. Pattern
     is NOT normalized; authors write patterns assuming single spaces.
     """
     if isinstance(tool_args, dict):
@@ -261,13 +261,25 @@ def _wrap_body_in_function(body: str) -> str:
     )
 
 
+def is_shimmed(source: str) -> bool:
+    """Return True when ``source`` already carries the matcher shim.
+
+    Detection is the literal :data:`_SHIM_BEGIN` sentinel. Subsequent
+    generator runs use this to drive idempotent replacement.
+    """
+    return _SHIM_BEGIN in source
+
+
 def inject_shim(original: str, matcher: str) -> str:
     """Return original script source with the matcher shim prepended.
 
     Idempotent (M5-T3): if the original already carries the shim
-    sentinels, the existing shim block is replaced rather than stacked.
+    sentinels, the existing shim block is stripped and replaced rather
+    than stacked. A second :func:`inject_shim` call yields the same
+    output as a first call against the never-shimmed body, preserving
+    the invariant that the file contains exactly ONE shim block.
     """
-    stripped = strip_shim(original)
+    stripped = strip_shim(original) if is_shimmed(original) else original
     shim = _build_shim(matcher)
     wrapped = _wrap_body_in_function(stripped)
     return shim + "\n" + wrapped + "\n_shim_dispatch()\n"
