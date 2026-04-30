@@ -176,7 +176,7 @@ def _original_main(stdin_bytes):
     from hook_utilities import (  # noqa: E402
         get_project_directory,
         get_today_session_log,
-        is_git_commit_command,
+        is_session_logged_command,
     )
     from hook_utilities.guards import skip_if_consumer_repo  # noqa: E402
 
@@ -245,7 +245,10 @@ def _original_main(stdin_bytes):
             if not command:
                 return 0
 
-            if not is_git_commit_command(command):
+            # M7-T3: this hook is registered under both `Bash(git commit*)` and
+            # `Bash(gh pr create*)` matchers. Without recognizing both commands,
+            # the pr-creation copy fired its shim correctly but no-opped here.
+            if not is_session_logged_command(command):
                 return 0
 
             project_dir = get_project_directory()
