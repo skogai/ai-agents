@@ -1,5 +1,5 @@
 ---
-applyTo: .agents/retrospective/**,docs/retros/**
+applyTo: docs/retros/**
 ---
 
 # Retrospective File Rules

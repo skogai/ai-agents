@@ -1,5 +1,5 @@
 ---
-applyTo: src/claude/**,.claude/agents/**,.claude/skills/**,.claude/commands/**
+applyTo: src/claude/**
 ---
 
 # Claude Agent and Skill Rules

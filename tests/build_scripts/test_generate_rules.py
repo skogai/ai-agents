@@ -194,6 +194,134 @@ def test_severity_field_in_source_is_passed_through(tmp_path: Path) -> None:
     assert "applyTo:" in out_text  # universal default synthesized
 
 
+# M7-T4: vendor-install path filter --------------------------------------
+
+
+def test_internal_paths_filtered_from_applyTo(tmp_path: Path) -> None:
+    """`.agents/`, `.claude/`, `.serena/` globs MUST be dropped from applyTo.
+
+    Source rules under .claude/rules/ reference internal repo paths that
+    do not ship in any downstream install. Without filtering, generated
+    .github/instructions/*.md files contain dead `applyTo` entries that
+    match nothing in a vendor tree (PR #1819 thread 3161395651).
+    """
+    _write_rule(
+        tmp_path / "rules_src",
+        "security",
+        frontmatter=(
+            'paths: ".agents/security/**,**/Auth/**,*.env*,'
+            '.github/workflows/**,.claude/rules/security.md"\n'
+        ),
+        body="body\n",
+    )
+    cfg = _write_config(tmp_path)
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    out = _read_output(tmp_path, "security")
+    fm = out.split("---")[1]
+    assert ".agents/security/**" not in fm
+    assert ".claude/rules/security.md" not in fm
+    # Non-internal globs MUST be preserved verbatim
+    assert "**/Auth/**" in fm
+    assert "*.env*" in fm
+    assert ".github/workflows/**" in fm
+
+
+def test_all_internal_paths_synthesizes_universal_scope(tmp_path: Path) -> None:
+    """When every glob is internal-only, applyTo MUST fall back to '**'.
+
+    Avoids emitting `applyTo: ""` (matches nothing) when a rule scoped
+    only to internal paths gets fully filtered.
+    """
+    _write_rule(
+        tmp_path / "rules_src",
+        "internal_only",
+        frontmatter='paths: ".agents/security/**,.claude/rules/foo.md,.serena/memories/**"\n',
+        body="body\n",
+    )
+    cfg = _write_config(tmp_path)
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    out = _read_output(tmp_path, "internal_only")
+    assert 'applyTo: "**"' in out or "applyTo: '**'" in out or "applyTo: **" in out
+
+
+def test_serena_internal_path_filtered(tmp_path: Path) -> None:
+    _write_rule(
+        tmp_path / "rules_src",
+        "memory",
+        frontmatter='paths: ".serena/memories/**,docs/**"\n',
+        body="body\n",
+    )
+    cfg = _write_config(tmp_path)
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    out = _read_output(tmp_path, "memory")
+    fm = out.split("---")[1]
+    assert ".serena/memories/**" not in fm
+    assert "docs/**" in fm
+
+
+def test_filter_handles_whitespace_around_commas(tmp_path: Path) -> None:
+    """`paths: ".agents/x/**, docs/**"` (note the space) must still filter."""
+    _write_rule(
+        tmp_path / "rules_src",
+        "spaced",
+        frontmatter='paths: ".agents/x/**, docs/**, .claude/y/**"\n',
+        body="body\n",
+    )
+    cfg = _write_config(tmp_path)
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    out = _read_output(tmp_path, "spaced")
+    fm = out.split("---")[1]
+    assert ".agents/" not in fm
+    assert ".claude/" not in fm
+    assert "docs/**" in fm
+
+
+# M7-T4: orphan pruning -----------------------------------------------------
+
+
+def test_orphan_instruction_file_is_pruned(tmp_path: Path) -> None:
+    """An output file with no matching source MUST be deleted on regen.
+
+    Without pruning, source deletions leave behind stale instruction
+    files that re-introduce the internal-path leakage M7-T4 was meant
+    to fix.
+    """
+    _write_rule(
+        tmp_path / "rules_src", "live", frontmatter='paths: "src/**"\n', body="x\n"
+    )
+    out_dir = tmp_path / "instr_out"
+    out_dir.mkdir(parents=True)
+    orphan = out_dir / "deleted-source.instructions.md"
+    orphan.write_text("---\napplyTo: .agents/internal/**\n---\nstale\n")
+    cfg = _write_config(tmp_path)
+
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    assert (out_dir / "live.instructions.md").is_file()
+    assert not orphan.exists(), "orphan instruction file MUST be pruned"
+
+
+def test_orphan_with_no_regen_sentinel_is_kept(tmp_path: Path) -> None:
+    """NO-REGEN sentinel takes precedence: orphan stays untouched."""
+    _write_rule(
+        tmp_path / "rules_src", "live", frontmatter='paths: "src/**"\n', body="x\n"
+    )
+    out_dir = tmp_path / "instr_out"
+    out_dir.mkdir(parents=True)
+    protected = out_dir / "hand-edited.instructions.md"
+    protected.write_text("<!-- NO-REGEN -->\nhand-edited do not touch\n")
+    cfg = _write_config(tmp_path)
+
+    rc, _ = generate_rules.generate_rules(cfg, tmp_path)
+    assert rc == 0
+    assert protected.exists()
+    assert "hand-edited" in protected.read_text()
+
+
 # NO-REGEN sentinel ----------------------------------------------------------
 
 

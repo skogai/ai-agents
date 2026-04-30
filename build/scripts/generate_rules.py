@@ -60,6 +60,15 @@ _DEFAULT_OUTPUT_SUFFIX = ".instructions.md"
 _SCOPE_KEYS = ("paths", "applyTo", "globs")
 _UNIVERSAL_SCOPE = "**"
 
+# M7-T4: vendor-install path filter. Globs that begin with these prefixes
+# reference internal repository directories that do not ship in any
+# downstream install (the rules generator emits files for the Copilot CLI
+# plugin and the GitHub Copilot instructions tree, neither of which carry
+# `.agents/`, `.claude/`, or `.serena/`). Filtering them out at emit time
+# prevents dead `applyTo` entries that would never match a vendor-side
+# file path.
+_INTERNAL_PATH_PREFIXES = (".agents/", ".claude/", ".serena/")
+
 
 class GenerateRulesError(Exception):
     """Domain error for rule generation."""
@@ -112,6 +121,24 @@ def _has_path_scope(frontmatter: dict[str, str | None]) -> bool:
     return False
 
 
+def _filter_internal_globs(value: str) -> str:
+    """Drop comma-separated glob entries pointing at internal-only paths.
+
+    Source rules under `.claude/rules/` declare ``applyTo``/``paths`` with
+    repo-local globs like ``.agents/security/**,**/Auth/**,*.env*,.claude/rules/security.md``.
+    Some of those entries (`.agents/`, `.claude/`, `.serena/` prefixes) only
+    exist in the source repository; for any downstream consumer they are
+    dead references that match nothing and add noise. Drop them and keep
+    everything else verbatim. Returns ``""`` when every entry was internal,
+    so callers can decide whether to synthesize a universal scope.
+    """
+    if not value or not value.strip():
+        return value
+    parts = [p.strip() for p in value.split(",")]
+    kept = [p for p in parts if p and not p.startswith(_INTERNAL_PATH_PREFIXES)]
+    return ",".join(kept)
+
+
 def _remap_frontmatter(
     frontmatter: dict[str, str | None],
     remap: dict[str, str],
@@ -123,6 +150,13 @@ def _remap_frontmatter(
 
     Iteration order is preserved so the output diff is stable. Drop wins
     over remap: a key listed in both is removed, not renamed.
+
+    M7-T4: scope values mapped to ``applyTo`` are filtered through
+    :func:`_filter_internal_globs` to drop dead-on-arrival references to
+    internal-only paths (``.agents/``, ``.claude/``, ``.serena/``). When
+    every glob in the source is internal, the universal scope is
+    synthesized so the rule still applies somewhere in the vendor tree
+    rather than being dropped entirely.
     """
     had_scope = _has_path_scope(frontmatter)
     result: dict[str, str | None] = {}
@@ -130,7 +164,21 @@ def _remap_frontmatter(
         if key in drop:
             continue
         new_key = remap.get(key, key)
+        # Sanitize the destination scope key (post-remap) so the filter
+        # runs once on `applyTo` regardless of whether the source used
+        # `paths`, `applyTo`, or `globs`.
+        if new_key == "applyTo" and isinstance(value, str):
+            value = _filter_internal_globs(value)
         result[new_key] = value
+    # If the post-filter applyTo is empty but the source had a scope,
+    # the source was entirely internal-only globs. Synthesize universal
+    # scope so the rule still ships rather than landing with applyTo: "".
+    if (
+        had_scope
+        and isinstance(result.get("applyTo"), str)
+        and not result["applyTo"].strip()
+    ):
+        result["applyTo"] = _UNIVERSAL_SCOPE
     if not had_scope and "applyTo" not in result:
         # Universal-scope default for unscoped rules. Insert at the top
         # of the output frontmatter for consistent placement.
@@ -297,8 +345,15 @@ def generate_rules(
     start = time.monotonic()
     print(f"Found {len(sources)} rule(s)")
 
+    expected_outputs: set[str] = set()
     for src in sources:
-        action, name, reason = _process_rule(
+        name = (
+            src.name[: -len(source_suffix)]
+            if src.name.endswith(source_suffix)
+            else src.stem
+        )
+        expected_outputs.add(f"{name}{output_suffix}")
+        action, name_out, reason = _process_rule(
             src,
             output_dir,
             source_suffix=source_suffix,
@@ -307,11 +362,27 @@ def generate_rules(
             drop=drop,
             what_if=what_if,
         )
-        result.entries.append(RuleAuditEntry(name=name, action=action, reason=reason))
+        result.entries.append(RuleAuditEntry(name=name_out, action=action, reason=reason))
         if action == "emitted":
             result.written += 1
         elif action == "sentinel-skipped":
             result.sentinel_skipped += 1
+
+    # M7-T4: prune orphan instruction files (output exists with no source).
+    # Without this, deleted-source files leave stale .github/instructions/*.md
+    # entries that re-introduce internal-path leakage and rotted applyTo
+    # globs. Skips files carrying the NO-REGEN sentinel and skips entirely
+    # in --what-if mode so dry-runs never delete.
+    if not what_if and output_dir.is_dir():
+        for existing in output_dir.glob(f"*{output_suffix}"):
+            if existing.name in expected_outputs:
+                continue
+            reason = regen_detect_reason(existing)
+            if reason is not None:
+                print(f"  NOTICE: kept orphan {existing} (NO-REGEN: {reason})")
+                continue
+            existing.unlink()
+            print(f"  PRUNED orphan: {existing.relative_to(repo_root)}")
 
     duration = time.monotonic() - start
 

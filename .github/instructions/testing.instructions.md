@@ -1,5 +1,5 @@
 ---
-applyTo: tests/**,**/*.Tests.ps1,**/tests/**,.claude/skills/**/tests/**,.agents/security/benchmarks/**,.claude/rules/testing.md
+applyTo: tests/**,**/*.Tests.ps1,**/tests/**
 ---
 
 # Test File Rules

@@ -1,5 +1,5 @@
 ---
-applyTo: .agents/governance/**
+applyTo: **
 ---
 
 # Governance File Rules
