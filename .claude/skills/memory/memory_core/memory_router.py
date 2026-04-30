@@ -215,6 +215,27 @@ def invoke_serena_search(
     return results
 
 
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _validate_http_url(endpoint: str) -> None:
+    """Reject non-HTTP(S) schemes before passing a URL to urllib.
+
+    ``urllib.request.urlopen`` accepts ``file://``, ``ftp://``, and other
+    schemes. An attacker who controls the endpoint argument could read
+    arbitrary local files (CWE-918 SSRF / CWE-22 path traversal via
+    file:// scheme). Restricting to http/https eliminates the class.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            f"endpoint scheme {parsed.scheme!r} not allowed; "
+            f"only {sorted(_ALLOWED_URL_SCHEMES)} accepted"
+        )
+
+
 def invoke_forgetful_search(
     query: str,
     endpoint: str = "http://localhost:8020/mcp",
@@ -226,13 +247,20 @@ def invoke_forgetful_search(
 
     Args:
         query: Search query string.
-        endpoint: HTTP endpoint URL.
+        endpoint: HTTP endpoint URL. MUST use http or https scheme;
+            other schemes (file://, ftp://, etc.) are rejected.
         max_results: Maximum results to return.
 
     Returns:
         List of MemoryResult objects.
     """
     results: list[MemoryResult] = []
+
+    try:
+        _validate_http_url(endpoint)
+    except ValueError as exc:
+        logger.warning("Forgetful search rejected: %s", exc)
+        return []
 
     request_body = json.dumps({
         "jsonrpc": "2.0",
@@ -254,6 +282,8 @@ def invoke_forgetful_search(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        # nosemgrep: request-with-tainted-url-from-urllib
+        # endpoint scheme validated above; only http/https reach this call.
         with urllib.request.urlopen(req, timeout=10) as resp:
             response_data = json.loads(resp.read().decode("utf-8"))
 

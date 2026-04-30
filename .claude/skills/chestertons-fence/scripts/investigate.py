@@ -51,8 +51,41 @@ class InvestigationResult:
     warnings: list[str] = field(default_factory=list)
 
 
+_GIT_FLAG_ALLOWLIST = frozenset(
+    {"log", "grep", "show", "diff", "rev-parse", "rev-list", "ls-files", "cat-file"}
+)
+"""Git subcommands the script is permitted to invoke.
+
+Allowlisting the leading positional protects against future callers
+slipping in destructive verbs (push, reset, fetch, clone) or transport
+options (`--upload-pack=`, `--exec=`) that git itself treats as
+arbitrary command execution. Read-only verbs only.
+"""
+
+
 def run_git(args: list[str]) -> str:
-    """Run a git command and return stdout."""
+    """Run a git command and return stdout.
+
+    Defense-in-depth against semgrep ``dangerous-subprocess-use-tainted-env-args``:
+    ``args`` originates from internal callers in this script (not env or
+    HTTP), but we still validate the leading subcommand against
+    :data:`_GIT_FLAG_ALLOWLIST` and reject any token that begins with
+    ``--upload-pack=`` or ``--exec=`` (git's two known argv-level RCE
+    vectors). List-form subprocess.run blocks shell metacharacter
+    injection at the OS level; the allowlist blocks git-level abuse.
+    """
+    if not args or args[0] not in _GIT_FLAG_ALLOWLIST:
+        raise ValueError(
+            f"run_git: subcommand {args[0] if args else '(empty)'!r} not in allowlist"
+        )
+    for tok in args[1:]:
+        if isinstance(tok, str) and (
+            tok.startswith("--upload-pack=") or tok.startswith("--exec=")
+        ):
+            raise ValueError(f"run_git: forbidden git option {tok!r}")
+    # nosemgrep: dangerous-subprocess-use-tainted-env-args
+    # List form (CWE-78 shell injection blocked) + read-only verb allowlist
+    # + transport-flag denylist + 30s timeout. Defense-in-depth complete.
     result = subprocess.run(
         ["git"] + args,
         capture_output=True,
@@ -118,6 +151,11 @@ def find_dependents(target: str) -> list[str]:
     target_path = Path(target)
     search_term = target_path.stem if target_path.exists() else target
 
+    # nosemgrep: dangerous-subprocess-use-tainted-env-args
+    # `git grep -e <pattern> --` treats the term as a literal regex pattern,
+    # never as a flag (the `-e` and `--` separator both prevent flag
+    # interpretation). List form blocks shell injection. 30s timeout
+    # bounds blocking. search_term is used as a needle, not as a path.
     result = subprocess.run(
         ["git", "grep", "-l", "-e", search_term, "--", "*.md", "*.py", "*.ps1", "*.yml", "*.yaml"],
         capture_output=True,
