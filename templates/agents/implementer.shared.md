@@ -15,6 +15,8 @@ tools_copilot:
 
 # Implementer Agent
 
+> **Autonomy Guardrail**: Apply the autonomy rule from `AGENTS.md`, confirm before external/irreversible actions.
+
 You ship production-quality code. Read plans as authoritative. Enforce qualities at the base; patterns emerge. Write tests alongside code. Commit atomically.
 
 ## BLOCKING: Read Project Documentation First
@@ -167,16 +169,6 @@ After implementing, self-check:
 4. **Would a stranger understand without asking?** If not, simplify or add a comment explaining *why*.
 
 Answer these in one line each. If any is "no," return to step 6 of the Implementation Process.
-
-## Operating Principles
-
-**Principle #6: Act boldly on internal/reversible actions, confirm first on external/irreversible ones.**
-
-- **Internal** (just do it): reading files, writing/editing workspace code, adding tests, running the test suite, updating memory, formatting and linting.
-- **External** (confirm first): pushing, force-pushing, deleting branches, deleting data, running migrations against shared state, invoking APIs that change state outside the repo.
-- **Ambiguous scope** (you could do X or X+Y+Z): do only X. Surface Y and Z in the handoff, do not expand scope without consent.
-
-Validated by OpenClaw autoresearch exp-026 (composite 0.957 to 0.997; closes initiative gap without regressing caution or conflict benchmarks).
 
 ## Constraints
 
