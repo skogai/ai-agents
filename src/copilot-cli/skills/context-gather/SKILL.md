@@ -1,5 +1,5 @@
 ---
-name: context_gather
+name: context-gather
 description: Gather comprehensive context from Forgetful Memory, Context7 docs, and web sources before planning or implementation. Use when starting complex tasks requiring multi-source context.
 argument-hint: <task-or-technology>
 model: opus
@@ -18,7 +18,9 @@ user-invocable: true
 
 **Purpose**: Gather relevant context from Forgetful Memory, Context7, and web sources before planning or implementing code.
 
-**Usage**: `/context_gather <detailed task description>`
+**Usage**: `/context-gather <detailed task description>`
+
+> Renamed 2026-04-30. Previously `/context_gather`. The underscore form is no longer recognized; use the hyphenated name.
 
 ---
 

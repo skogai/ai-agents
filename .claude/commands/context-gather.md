@@ -16,7 +16,9 @@ model: opus
 
 **Purpose**: Gather relevant context from Forgetful Memory, Context7, and web sources before planning or implementing code.
 
-**Usage**: `/context_gather <detailed task description>`
+**Usage**: `/context-gather <detailed task description>`
+
+> Renamed 2026-04-30. Previously `/context_gather`. The underscore form is no longer recognized; use the hyphenated name.
 
 ---
 
