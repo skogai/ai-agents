@@ -18,10 +18,9 @@ from _eval_common import (
 # prompt. Held in a tuple to make the structure obvious at the call site.
 VARIANTS: tuple[str, ...] = ("agent", "baseline")
 
-# Token estimation: roughly half input, half output. Refined when the live
-# run produces measured numbers; for the dry-run preview, midpoint is fine.
+# Token estimation: roughly 70% input, 30% output. Refined when the live
+# run produces measured numbers; for the dry-run preview, this is a heuristic.
 _INPUT_TOKEN_FRACTION = 0.7
-_OUTPUT_TOKEN_FRACTION = 1.0 - _INPUT_TOKEN_FRACTION
 
 
 class UnsupportedModelError(Exception):

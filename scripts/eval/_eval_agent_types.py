@@ -41,8 +41,7 @@ class FixtureValidationError(Exception):
 class Assertion:
     """One scoring assertion attached to a fixture.
 
-    Constraint: REGEX kind sets `pattern`; VERDICT kind sets `expected_value`.
-    At least one of the two MUST be non-None.
+    Constraint: REGEX kind requires `pattern`; VERDICT kind requires `expected_value`.
     """
 
     kind: AssertionKind
@@ -50,10 +49,10 @@ class Assertion:
     expected_value: str | None = None
 
     def __post_init__(self) -> None:
-        if self.pattern is None and self.expected_value is None:
-            raise ValueError(
-                "Assertion requires pattern (REGEX) or expected_value (VERDICT)"
-            )
+        if self.kind == AssertionKind.REGEX and self.pattern is None:
+            raise ValueError("REGEX assertion requires 'pattern' to be set")
+        if self.kind == AssertionKind.VERDICT and self.expected_value is None:
+            raise ValueError("VERDICT assertion requires 'expected_value' to be set")
 
 
 @dataclass(frozen=True)
