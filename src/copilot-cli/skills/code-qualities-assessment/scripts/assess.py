@@ -352,6 +352,20 @@ def generate_json_report(assessments: list[FileAssessment]) -> str:
     }, indent=2)
 
 
+def _get_threshold(quality_thresholds: dict, key: str = "min") -> float:
+    """Get threshold value with backward compatibility for legacy 'max' key.
+
+    Legacy configs may use 'max' instead of 'min' for coupling thresholds.
+    This helper provides backward compatibility by falling back to 'max'
+    when 'min' is not present.
+    """
+    if key in quality_thresholds:
+        return quality_thresholds[key]
+    if "max" in quality_thresholds:
+        return quality_thresholds["max"]
+    raise KeyError(f"Neither '{key}' nor 'max' found in threshold config")
+
+
 def check_thresholds(assessments: list[FileAssessment], config: dict, context: str) -> int:
     """
     Check if quality scores meet configured thresholds.
@@ -368,42 +382,47 @@ def check_thresholds(assessments: list[FileAssessment], config: dict, context: s
         thresholds = {**thresholds, **context_thresholds}
 
     for assessment in assessments:
-        if assessment.cohesion.value < thresholds["cohesion"]["min"]:
+        cohesion_min = _get_threshold(thresholds["cohesion"], "min")
+        if assessment.cohesion.value < cohesion_min:
             print(
                 f"❌ {assessment.file_path}: Cohesion {assessment.cohesion.value} "
-                f"< {thresholds['cohesion']['min']}",
+                f"< {cohesion_min}",
                 file=sys.stderr
             )
             return 11
 
-        if assessment.coupling.value < thresholds["coupling"]["min"]:
+        coupling_min = _get_threshold(thresholds["coupling"], "min")
+        if assessment.coupling.value < coupling_min:
             print(
                 f"❌ {assessment.file_path}: Coupling {assessment.coupling.value} "
-                f"< {thresholds['coupling']['min']}",
+                f"< {coupling_min}",
                 file=sys.stderr
             )
             return 11
 
-        if assessment.encapsulation.value < thresholds["encapsulation"]["min"]:
+        encapsulation_min = _get_threshold(thresholds["encapsulation"], "min")
+        if assessment.encapsulation.value < encapsulation_min:
             print(
                 f"❌ {assessment.file_path}: Encapsulation {assessment.encapsulation.value} "
-                f"< {thresholds['encapsulation']['min']}",
+                f"< {encapsulation_min}",
                 file=sys.stderr
             )
             return 11
 
-        if assessment.testability.value < thresholds["testability"]["min"]:
+        testability_min = _get_threshold(thresholds["testability"], "min")
+        if assessment.testability.value < testability_min:
             print(
                 f"❌ {assessment.file_path}: Testability {assessment.testability.value} "
-                f"< {thresholds['testability']['min']}",
+                f"< {testability_min}",
                 file=sys.stderr
             )
             return 11
 
-        if assessment.non_redundancy.value < thresholds["nonRedundancy"]["min"]:
+        non_redundancy_min = _get_threshold(thresholds["nonRedundancy"], "min")
+        if assessment.non_redundancy.value < non_redundancy_min:
             print(
                 f"❌ {assessment.file_path}: Non-Redundancy {assessment.non_redundancy.value} "
-                f"< {thresholds['nonRedundancy']['min']}",
+                f"< {non_redundancy_min}",
                 file=sys.stderr
             )
             return 11

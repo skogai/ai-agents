@@ -195,8 +195,14 @@ def test_skill_mention_in_prose_does_not_satisfy(fake_repo: Path) -> None:
     assert "code-qualities-assessment" in skill_names
 
 
-def test_all_gates_missing_reports_three_violations(fake_repo: Path) -> None:
-    """When every gate is gone, every gate is reported."""
+def test_all_gates_missing_reports_section_violation(fake_repo: Path) -> None:
+    """When the mandatory section is missing, the section violation is reported.
+
+    The implementation returns early when the section is absent because
+    checking for skill invocations is only meaningful within the mandatory
+    section. Reporting missing skills when no section exists would be
+    redundant noise.
+    """
     bad = """\
 ---
 description: Build.
@@ -212,12 +218,9 @@ Some text.
 """
     _write_build_md(fake_repo, bad)
     violations = cbg.collect_violations(fake_repo)
-    skill_names = {v.name for v in violations if v.kind == "skill"}
-    assert skill_names == {
-        "code-qualities-assessment",
-        "taste-lints",
-        "doc-accuracy",
-    }
+    assert len(violations) == 1
+    assert violations[0].kind == "section"
+    assert violations[0].name == "Mandatory Exit Gates"
 
 
 # --- Edge cases ------------------------------------------------------------
