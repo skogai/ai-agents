@@ -183,6 +183,131 @@ class TestCheckMergeReadiness:
                 check_merge_readiness("o", "r", 999)
             assert exc.value.code == 2
 
+    def test_cancelled_with_later_success_does_not_block(self):
+        """PR #1887 false-FAIL pattern: a CANCELLED debounce row plus a later
+        SUCCESS row for the same check name was reported as a failed required
+        check. After dedupe, the verdict for that name is OK and CanMerge is
+        True. The retrospective records four false-FAIL reports caused by
+        this exact pattern.
+        """
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        commit = pr_data["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+        commit["statusCheckRollup"]["contexts"]["nodes"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "ci/build",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+                "isRequired": True,
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "ci/build",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "isRequired": True,
+            },
+        ]
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+
+        assert result["CanMerge"] is True, (
+            f"CANCELLED+SUCCESS dedupe failed; reasons: {result['Reasons']}"
+        )
+        assert result["FailedRequiredChecks"] == [], (
+            "ci/build was incorrectly reported as a failed required check"
+        )
+        assert result["CIPassing"] is True
+
+    def test_cancelled_with_later_failure_blocks(self):
+        """Counterpart to the OK case: CANCELLED + FAILURE on the same name
+        must still report FAIL. The dedupe rule is "any FAILURE wins"; it
+        must not let a CANCELLED row hide a real failure.
+        """
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        commit = pr_data["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+        commit["statusCheckRollup"]["contexts"]["nodes"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "ci/test",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+                "isRequired": True,
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "ci/test",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+                "isRequired": True,
+            },
+        ]
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+
+        assert result["CanMerge"] is False
+        assert result["FailedRequiredChecks"] == ["ci/test"]
+
+    def test_cancelled_only_does_not_block(self):
+        """Edge case: a check name whose only conclusion is CANCELLED has no
+        opinion and must not block. (Without a passing or failing run, the
+        check has not produced a verdict; treating it as a failed required
+        check is the bug the retrospective documents.)
+        """
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        commit = pr_data["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+        commit["statusCheckRollup"]["contexts"]["nodes"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "ci/lint",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+                "isRequired": True,
+            },
+        ]
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+
+        assert result["FailedRequiredChecks"] == []
+        assert result["CanMerge"] is True
+
+    def test_pending_then_cancelled_then_success_is_ok(self):
+        """Three-row case: an in-progress row, a cancelled supersedence, and
+        a successful final run. Verdict is OK because SUCCESS exists and
+        nothing is FAILURE.
+        """
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        commit = pr_data["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+        commit["statusCheckRollup"]["contexts"]["nodes"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "ci/build",
+                "status": "IN_PROGRESS",
+                "conclusion": "",
+                "isRequired": True,
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "ci/build",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+                "isRequired": True,
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "ci/build",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "isRequired": True,
+            },
+        ]
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+
+        assert result["CanMerge"] is True
+        assert result["FailedRequiredChecks"] == []
+        assert result["PendingRequiredChecks"] == []
+
 
 # ---------------------------------------------------------------------------
 # Tests: main
