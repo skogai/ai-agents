@@ -542,12 +542,24 @@ def get_trusted_source_comments(
 # ---------------------------------------------------------------------------
 
 
+# Safety bound on the reviewThreads pagination loop. A PR with >5000 threads
+# is almost certainly a misuse rather than a real review state; we exit
+# rather than spin forever. The PR #1887 retrospective records that the
+# prior single-page first:100 query masked 6+ unresolved threads twice.
+_REVIEW_THREADS_MAX_PAGES = 50
+
+
 def get_unresolved_review_threads(
     owner: str,
     repo: str,
     pull_request: int,
 ) -> list[dict]:
     """Retrieve unresolved review threads on a pull request.
+
+    Pages through the reviewThreads connection until pageInfo.hasNextPage is
+    false or _REVIEW_THREADS_MAX_PAGES is reached. The earlier first:100
+    single-page implementation hid unresolved threads on PRs with thread
+    counts that crossed the page boundary; the loop closes that cliff.
 
     Returns an empty list on API failure (never None).
 
@@ -557,13 +569,18 @@ def get_unresolved_review_threads(
         pull_request: PR number.
 
     Returns:
-        List of thread dicts where isResolved is False.
+        List of thread dicts where isResolved is False, drawn from every
+        page of the reviewThreads connection.
     """
     query = """\
-query($owner: String!, $name: String!, $prNumber: Int!) {
+query($owner: String!, $name: String!, $prNumber: Int!, $cursor: String) {
     repository(owner: $owner, name: $name) {
         pullRequest(number: $prNumber) {
-            reviewThreads(first: 100) {
+            reviewThreads(first: 100, after: $cursor) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
                 nodes {
                     id
                     isResolved
@@ -578,29 +595,44 @@ query($owner: String!, $name: String!, $prNumber: Int!) {
     }
 }"""
 
-    try:
-        data = gh_graphql(
-            query,
-            {"owner": owner, "name": repo, "prNumber": pull_request},
+    aggregated: list[dict] = []
+    cursor: str | None = None
+    pages_seen = 0
+
+    while pages_seen < _REVIEW_THREADS_MAX_PAGES:
+        pages_seen += 1
+        variables = {"owner": owner, "name": repo, "prNumber": pull_request}
+        if cursor is not None:
+            variables["cursor"] = cursor
+
+        try:
+            data = gh_graphql(query, variables)
+        except RuntimeError as exc:
+            warnings.warn(
+                f"Failed to query review threads for PR #{pull_request}: {exc}",
+                stacklevel=2,
+            )
+            return []
+
+        review_threads = (
+            data.get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads")
         )
-    except RuntimeError as exc:
-        warnings.warn(
-            f"Failed to query review threads for PR #{pull_request}: {exc}",
-            stacklevel=2,
-        )
-        return []
+        if not review_threads:
+            break
 
-    threads = (
-        data.get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        .get("nodes", [])
-    )
+        page_nodes = review_threads.get("nodes", [])
+        aggregated.extend(page_nodes)
 
-    if not threads:
-        return []
+        page_info = review_threads.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            break
 
-    return [t for t in threads if not t.get("isResolved", True)]
+    return [t for t in aggregated if not t.get("isResolved", True)]
 
 
 # ---------------------------------------------------------------------------
