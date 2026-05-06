@@ -274,6 +274,103 @@ class TestMain:
                 main(["--pull-request", "50"])
             assert exc.value.code == 2
 
+    def test_paginates_across_multiple_pages(self, capsys):
+        """The PR #1887 cliff: a >100-thread PR must report all threads, not page 1.
+
+        Two pages mocked at the GraphQL layer; the script's main() should
+        return the union of both pages in `threads` and report the right
+        totals in `total_threads` / `unresolved_count`.
+        """
+        page1_threads = [_thread(f"p1-{i}", resolved=False) for i in range(100)]
+        page2_threads = [_thread(f"p2-{i}", resolved=True) for i in range(7)]
+
+        def make_response(threads, has_next, end_cursor, total):
+            return {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "totalCount": total,
+                            "pageInfo": {
+                                "hasNextPage": has_next,
+                                "endCursor": end_cursor,
+                            },
+                            "nodes": threads,
+                        },
+                    },
+                },
+            }
+
+        responses = [
+            make_response(page1_threads, True, "C2", 107),
+            make_response(page2_threads, False, None, 107),
+        ]
+
+        with patch(
+            "get_pr_review_threads.assert_gh_authenticated",
+        ), patch(
+            "get_pr_review_threads.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_review_threads._run_threads_query",
+            side_effect=responses,
+        ) as mock_query:
+            rc = main(["--pull-request", "50"])
+
+        assert rc == 0
+        assert mock_query.call_count == 2, (
+            "Pagination loop did not call the query twice; page 2 was missed"
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["total_threads"] == 107
+        assert output["unresolved_count"] == 100  # only page 1 unresolved
+        assert output["resolved_count"] == 7
+
+        ids = {t["thread_id"] for t in output["threads"]}
+        assert any(i.startswith("p1-") for i in ids), "page 1 IDs missing"
+        assert any(i.startswith("p2-") for i in ids), "page 2 IDs missing (cliff returned)"
+
+    def test_pagination_propagates_cursor(self):
+        """Cursor from page 1 must be passed as $cursor to page 2's query."""
+        page1 = {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "totalCount": 2,
+                        "pageInfo": {"hasNextPage": True, "endCursor": "CURSOR_X"},
+                        "nodes": [_thread("t1", resolved=False)],
+                    },
+                },
+            },
+        }
+        page2 = {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "totalCount": 2,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [_thread("t2", resolved=False)],
+                    },
+                },
+            },
+        }
+
+        with patch(
+            "get_pr_review_threads.assert_gh_authenticated",
+        ), patch(
+            "get_pr_review_threads.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_review_threads._run_threads_query",
+            side_effect=[page1, page2],
+        ) as mock_query:
+            main(["--pull-request", "50"])
+
+        # On the second call, the cursor kwarg must be CURSOR_X.
+        call_two_kwargs = mock_query.call_args_list[1]
+        assert "CURSOR_X" in str(call_two_kwargs), (
+            "endCursor from page 1 was not propagated to page 2 query"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: _transform_thread

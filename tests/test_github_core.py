@@ -899,6 +899,128 @@ class TestGetUnresolvedReviewThreads:
         assert result is not None
         assert isinstance(result, list)
 
+    def test_paginates_until_has_next_page_false(self):
+        """Closes PR #1887's pagination cliff: callers see threads on page 2+.
+
+        Two pages: 100 unresolved threads on page 1, 5 unresolved on page 2.
+        The PR #1887 retro records that the prior single-page query missed
+        the second page entirely and reported "0 unresolved" while threads
+        sat there. With pagination, all 105 are returned.
+        """
+        page_one = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "CURSOR_PAGE_2",
+                            },
+                            "nodes": [
+                                _thread(f"page1-{i}", False, i) for i in range(100)
+                            ],
+                        }
+                    }
+                }
+            }
+        })
+        page_two = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                            "nodes": [
+                                _thread(f"page2-{i}", False, 1000 + i) for i in range(5)
+                            ],
+                        }
+                    }
+                }
+            }
+        })
+
+        responses = [_completed(stdout=page_one), _completed(stdout=page_two)]
+        with patch("subprocess.run", side_effect=responses) as mock_run:
+            result = get_unresolved_review_threads("owner", "repo", 42)
+
+        assert mock_run.call_count == 2, (
+            "Pagination loop did not call gh twice; pageInfo.hasNextPage=true was ignored"
+        )
+        assert len(result) == 105, f"Expected 105 unresolved threads across pages, got {len(result)}"
+        page1_ids = {f"page1-{i}" for i in range(100)}
+        page2_ids = {f"page2-{i}" for i in range(5)}
+        actual_ids = {t["id"] for t in result}
+        assert actual_ids == page1_ids | page2_ids, "Page-2 thread IDs missing from result"
+
+    def test_pagination_passes_cursor_to_second_page(self):
+        """The endCursor from page 1 must be sent as $cursor on page 2.
+
+        Without that, GitHub returns page 1 again forever. We assert the
+        gh argv on call #2 contains the cursor value from page 1.
+        """
+        page_one = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "CURSOR_FROM_PAGE_1",
+                            },
+                            "nodes": [_thread("t1", False, 1)],
+                        }
+                    }
+                }
+            }
+        })
+        page_two = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
+        })
+
+        responses = [_completed(stdout=page_one), _completed(stdout=page_two)]
+        with patch("subprocess.run", side_effect=responses) as mock_run:
+            get_unresolved_review_threads("owner", "repo", 42)
+
+        # Inspect the second subprocess.run call's argv for the cursor value.
+        second_call_argv = mock_run.call_args_list[1][0][0]
+        joined = " ".join(second_call_argv)
+        assert "cursor=CURSOR_FROM_PAGE_1" in joined, (
+            f"Cursor from page 1 not propagated to page 2 query; argv was: {joined}"
+        )
+
+    def test_pagination_stops_when_endcursor_is_empty(self):
+        """Defensive: a hasNextPage=true with empty endCursor must not loop forever."""
+        page_one = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": ""},
+                            "nodes": [_thread("t1", False, 1)],
+                        }
+                    }
+                }
+            }
+        })
+
+        with patch("subprocess.run", side_effect=[_completed(stdout=page_one)]) as mock_run:
+            result = get_unresolved_review_threads("owner", "repo", 42)
+
+        assert mock_run.call_count == 1, "Loop did not stop on empty endCursor"
+        assert len(result) == 1
+
 
 # ---------------------------------------------------------------------------
 # Rate limits
