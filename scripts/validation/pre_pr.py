@@ -462,6 +462,29 @@ def validate_design_review_frontmatter(repo_root: Path) -> bool:
     return all_passed
 
 
+def validate_build_gates(repo_root: Path) -> bool:
+    """Verify ``.claude/commands/build.md`` still wires the required exit gates.
+
+    The /build command is the implementer's exit path. If a future edit
+    removes the code-qualities-assessment / taste-lints / doc-accuracy
+    invocations, the iteration paradox documented in PR #1887 returns.
+    Lock the contract here. See ``check_build_gates.py`` for the rules.
+    """
+    script = repo_root / "scripts" / "validation" / "check_build_gates.py"
+    if not script.exists():
+        raise MissingScriptSkip(
+            "scripts/validation/check_build_gates.py not present"
+        )
+    exit_code, stdout, stderr = _run_subprocess(
+        [sys.executable, str(script), "--repo-root", str(repo_root)]
+    )
+    output = (stdout or "") + (stderr or "")
+    if output.strip():
+        for line in output.strip().splitlines()[:40]:
+            print(line)
+    return exit_code == 0
+
+
 def validate_agent_drift(repo_root: Path) -> bool:
     """Detect agent semantic drift.
 
@@ -589,6 +612,13 @@ def main(argv: list[str] | None = None) -> int:
         "Design Review Frontmatter",
         state,
         lambda: validate_design_review_frontmatter(repo_root),
+    )
+
+    # 3.7 Build Command Exit Gates (PR #1887 retrospective Layer 2)
+    run_validation(
+        "Build Command Exit Gates",
+        state,
+        lambda: validate_build_gates(repo_root),
     )
 
     # 3.9 YAML Style (skip if quick)
