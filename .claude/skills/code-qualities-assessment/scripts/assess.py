@@ -113,7 +113,7 @@ def load_config(config_path: str) -> dict:
         return {
             "thresholds": {
                 "cohesion": {"min": 7, "warn": 5},
-                "coupling": {"max": 3, "warn": 5},
+                "coupling": {"min": 7, "warn": 5},
                 "encapsulation": {"min": 7, "warn": 5},
                 "testability": {"min": 6, "warn": 4},
                 "nonRedundancy": {"min": 8, "warn": 6}
@@ -376,10 +376,10 @@ def check_thresholds(assessments: list[FileAssessment], config: dict, context: s
             )
             return 11
 
-        if assessment.coupling.value > thresholds["coupling"]["max"]:
+        if assessment.coupling.value < thresholds["coupling"]["min"]:
             print(
                 f"❌ {assessment.file_path}: Coupling {assessment.coupling.value} "
-                f"> {thresholds['coupling']['max']}",
+                f"< {thresholds['coupling']['min']}",
                 file=sys.stderr
             )
             return 11

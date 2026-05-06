@@ -109,7 +109,8 @@ python3 scripts/assess.py --target <path> [options]
 |-----------|----------|---------|-------------|
 | `--target` | Yes | - | File, directory, or glob pattern |
 | `--context` | No | production | production, test, or generated |
-| `--changed-only` | No | false | Only assess changed files (git diff) |
+| `--changed-only` | No | false | Only assess changed files (git diff HEAD) |
+| `--diff-base` | No | - | Assess files changed since specified base ref (e.g., 'main') |
 | `--format` | No | markdown | markdown, json, or html |
 | `--config` | No | .qualityrc.json | Path to config file |
 | `--output` | No | stdout | Output file path |
@@ -134,7 +135,7 @@ Create `.qualityrc.json` to customize thresholds:
 {
   "thresholds": {
     "cohesion": { "min": 7, "warn": 5 },
-    "coupling": { "max": 3, "warn": 5 },
+    "coupling": { "min": 7, "warn": 5 },
     "encapsulation": { "min": 7, "warn": 5 },
     "testability": { "min": 6, "warn": 4 },
     "nonRedundancy": { "min": 8, "warn": 6 }
