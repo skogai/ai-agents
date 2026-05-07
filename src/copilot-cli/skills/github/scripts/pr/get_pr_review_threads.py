@@ -236,7 +236,13 @@ def _collect_all_threads(
         if review_threads is None:
             if pages_seen == 1:
                 return None, 0, False
-            break
+            warnings.warn(
+                f"Mid-pagination structural failure for PR #{pr} "
+                f"on page {pages_seen}; result truncated at "
+                f"{len(aggregated)} threads. Reason: structural_failure.",
+                stacklevel=2,
+            )
+            return aggregated, total_count, True
 
         page_nodes = review_threads.get("nodes", [])
         aggregated.extend(page_nodes)
