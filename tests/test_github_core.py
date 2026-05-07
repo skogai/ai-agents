@@ -1184,6 +1184,72 @@ class TestGetUnresolvedReviewThreads:
             "reason=nodes_missing" in r.message for r in caplog.records
         ), "Null reviewThreads.nodes must log reason=nodes_missing"
 
+    def test_cursor_missing_emits_warning_and_logs_reason(self, caplog):
+        """When hasNextPage=true but endCursor is empty/null, the loop must
+        emit a warnings.warn AND a structured log line with
+        ``op=review_threads_failed reason=cursor_missing`` before breaking,
+        so callers cannot mistake the partial result for a complete one.
+        Defensive guardrail flagged by Copilot review on PR #1897.
+        """
+        import logging
+        page_one = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": ""},
+                            "nodes": [_thread("t1", False, 1)],
+                        }
+                    }
+                }
+            }
+        })
+        with caplog.at_level(logging.WARNING, logger="scripts.github_core.api"):
+            with patch(
+                "subprocess.run", side_effect=[_completed(stdout=page_one)],
+            ) as mock_run:
+                with pytest.warns(UserWarning, match=r"cursor_missing"):
+                    result = get_unresolved_review_threads("owner", "repo", 42)
+        assert mock_run.call_count == 1
+        assert len(result) == 1
+        assert any(
+            "reason=cursor_missing" in r.message for r in caplog.records
+        ), "cursor_missing branch must emit op=review_threads_failed reason=cursor_missing"
+
+    def test_mid_pagination_structural_failure_emits_warning(self, caplog):
+        """Page 1 OK, page 2 structurally invalid → caller sees a warning.
+
+        A structurally invalid page-2 response (missing repository.pullRequest
+        block, etc.) on a multi-page query truncates the aggregate. Without
+        the warning the loop just breaks and callers see N partial threads
+        with no signal that pages 2+ were dropped.
+        """
+        import logging
+        page_one = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cur1"},
+                            "nodes": [_thread("t1", False, 1)],
+                        }
+                    }
+                }
+            }
+        })
+        page_two_invalid = json.dumps({"data": {"repository": None}})
+        with caplog.at_level(logging.WARNING, logger="scripts.github_core.api"):
+            with patch("subprocess.run", side_effect=[
+                _completed(stdout=page_one),
+                _completed(stdout=page_two_invalid),
+            ]):
+                with pytest.warns(UserWarning, match=r"structural_failure"):
+                    result = get_unresolved_review_threads("owner", "repo", 42)
+        assert len(result) == 1, "page 1 result must be preserved on page 2 failure"
+        assert any(
+            "reason=structural_failure" in r.message for r in caplog.records
+        ), "mid-pagination structural failure must emit reason=structural_failure"
+
     def test_pagination_cap_emits_warning_and_stops(self):
         """At-cap exit must warn the caller, not silently truncate.
 

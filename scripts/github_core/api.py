@@ -753,6 +753,25 @@ def get_unresolved_review_threads(
         if status == FetchStatus.TRANSPORT_ERROR:
             return []
         if status == FetchStatus.STRUCTURAL_MISSING:
+            if pages_seen > 1:
+                # Mid-pagination structural failure: pages 1..N-1 succeeded
+                # and page N returned a structurally invalid response. The
+                # callers see a truncated result, so emit the same surfaced
+                # warning shape used for cursor_missing and page-cap-exceeded
+                # rather than letting the empty-page silently terminate the
+                # loop. Page 1 failures already return [] above; the guard
+                # here is the multi-page case.
+                warnings.warn(
+                    f"Mid-pagination structural failure for PR "
+                    f"#{pull_request} on page {pages_seen}; result truncated "
+                    f"at {len(aggregated)} threads. Reason: structural_failure.",
+                    stacklevel=2,
+                )
+                logger.warning(
+                    "op=review_threads_failed pr=%d owner=%s repo=%s "
+                    "page=%d aggregated=%d reason=structural_failure",
+                    pull_request, owner, repo, pages_seen, len(aggregated),
+                )
             break
         assert review_threads is not None  # noqa: S101
         page_nodes = review_threads.get("nodes", [])
