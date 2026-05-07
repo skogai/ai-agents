@@ -45,7 +45,9 @@ if _lib_dir not in sys.path:
 
 from github_core.api import (  # noqa: E402
     assert_gh_authenticated,
+    count_unresolved_threads,
     error_and_exit,
+    filter_unresolved_threads,
     gh_graphql,
     resolve_repo_params,
 )
@@ -231,7 +233,9 @@ def _collect_all_threads(
         data = _run_threads_query(owner, repo, pr, comments_limit, cursor)
         review_threads = _extract_review_threads(data, owner, repo, pr, pages_seen)
         if review_threads is None:
-            return None, 0, False
+            if pages_seen == 1:
+                return None, 0, False
+            break
 
         page_nodes = review_threads.get("nodes", [])
         aggregated.extend(page_nodes)
@@ -323,12 +327,12 @@ def main(argv: list[str] | None = None) -> int:
         error_and_exit(f"PR #{pr} not found or has no review threads", 2)
 
     if args.unresolved_only:
-        threads = [t for t in threads if not t.get("isResolved", True)]
+        threads = filter_unresolved_threads(threads)
 
     transformed = [_transform_thread(t, args.include_comments) for t in threads]
 
     total = len(threads)
-    unresolved = sum(1 for t in threads if not t.get("isResolved", True))
+    unresolved = count_unresolved_threads(threads)
 
     output = {
         "success": True,
