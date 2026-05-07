@@ -633,7 +633,7 @@ def _fetch_review_threads_page(
     cursor: str | None,
     pages_seen: int,
     aggregated_count: int,
-) -> tuple[str, dict | None]:
+) -> tuple[FetchStatus, dict | None]:
     """Fetch one page of reviewThreads.
 
     Returns ``(status, review_threads_dict)``. status is one of
@@ -767,6 +767,21 @@ def get_unresolved_review_threads(
             break
         cursor = page_info.get("endCursor")
         if not cursor:
+            # hasNextPage was true but endCursor is empty/null. Cannot
+            # advance — surface as a truncation event rather than a clean
+            # exit, since callers would otherwise see a "complete"-looking
+            # result that silently dropped pages 2+.
+            warnings.warn(
+                f"hasNextPage=true but endCursor empty for PR "
+                f"#{pull_request} on page {pages_seen}; result truncated "
+                f"at {len(aggregated)} threads. Reason: cursor_missing.",
+                stacklevel=2,
+            )
+            logger.warning(
+                "op=review_threads_failed pr=%d owner=%s repo=%s "
+                "page=%d aggregated=%d reason=cursor_missing",
+                pull_request, owner, repo, pages_seen, len(aggregated),
+            )
             break
     else:
         _warn_review_threads_capped(pull_request, len(aggregated))
