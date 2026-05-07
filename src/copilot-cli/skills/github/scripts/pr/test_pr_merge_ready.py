@@ -142,8 +142,8 @@ def _check_run_verdict(rows: list[dict]) -> str:
     Verdict precedence:
       1. FAIL  - any row has a real failure conclusion (not in the passing
                  or no-opinion sets, e.g. FAILURE, TIMED_OUT, ACTION_REQUIRED).
-      2. PENDING - any row has status != COMPLETED.
-      3. OK    - any row has a passing conclusion.
+      2. OK    - any row has a passing conclusion.
+      3. PENDING - any row has status != COMPLETED (and no passing row).
       4. SKIP  - all rows are CANCELLED (no real opinion); not blocking.
 
     Aligns with the brief in the PR #1887 retrospective: "OK if any SUCCESS
@@ -243,6 +243,7 @@ def _route_check_run_groups(
     *,
     failed_required: list[str], pending_required: list[str],
     failed_non_required: list[str], pending_non_required: list[str],
+    skipped_names: list[str],
 ) -> None:
     """Verdict + route + dedupe-log for each CheckRun group."""
     for name, rows in grouped.items():
@@ -257,7 +258,8 @@ def _route_check_run_groups(
             )
         _route_verdict(name, verdict, is_required,
                        failed_required, pending_required,
-                       failed_non_required, pending_non_required)
+                       failed_non_required, pending_non_required,
+                       skipped_names=skipped_names)
 
 
 def _route_status_context_groups(
@@ -267,6 +269,7 @@ def _route_status_context_groups(
     *,
     failed_required: list[str], pending_required: list[str],
     failed_non_required: list[str], pending_non_required: list[str],
+    skipped_names: list[str],
 ) -> None:
     """Verdict + route for StatusContext groups; skip duplicates of
     CheckRun names (rollup may publish both for the same logical check).
@@ -290,7 +293,8 @@ def _route_status_context_groups(
             )
         _route_verdict(name, verdict, is_required,
                        failed_required, pending_required,
-                       failed_non_required, pending_non_required)
+                       failed_non_required, pending_non_required,
+                       skipped_names=skipped_names)
 
 
 def _classify_check_contexts(
@@ -300,15 +304,20 @@ def _classify_check_contexts(
     pending_required: list[str],
     failed_non_required: list[str],
     pending_non_required: list[str],
+    skipped_names: list[str],
 ) -> None:
     """Group rollup contexts by name; route each group's verdict to a bucket.
 
     Multiple rows under the same name (debounce supersession) collapse via
     _check_run_verdict / _status_context_verdict before routing. A verdict
-    of OK or SKIP appends to nothing; the caller computes passed_checks
-    from the surviving names. The PR #1887 retrospective records four
-    false-FAIL reports caused by counting CANCELLED debounce rows as
-    failed required checks; the dedupe protects against that recurrence.
+    of OK appends to nothing (caller computes passed_checks from the
+    surviving names minus blocked minus skipped). A verdict of SKIP
+    (CANCELLED-only, no opinion) appends to ``skipped_names`` so the
+    passed-checks count can subtract it out — without that subtraction,
+    a debounce-cancelled rollup would be counted as passed.
+
+    Closes the false-FAIL class on CANCELLED+SUCCESS dedupe AND the
+    false-PASS class on CANCELLED-only debounce groups.
     """
     grouped_check_runs, grouped_status_contexts, is_required_by_name = (
         _group_contexts_by_name(contexts)
@@ -318,6 +327,7 @@ def _classify_check_contexts(
         failed_required=failed_required, pending_required=pending_required,
         failed_non_required=failed_non_required,
         pending_non_required=pending_non_required,
+        skipped_names=skipped_names,
     )
     _route_status_context_groups(
         grouped_status_contexts,
@@ -326,6 +336,7 @@ def _classify_check_contexts(
         failed_required=failed_required, pending_required=pending_required,
         failed_non_required=failed_non_required,
         pending_non_required=pending_non_required,
+        skipped_names=skipped_names,
     )
 
 
@@ -337,18 +348,33 @@ def _route_verdict(
     pending_required: list[str],
     failed_non_required: list[str],
     pending_non_required: list[str],
+    skipped_names: list[str] | None = None,
 ) -> None:
-    """Append name to the appropriate bucket given its verdict and required flag."""
+    """Append name to the appropriate bucket given its verdict.
+
+    SKIP-verdict names (CANCELLED-only, no opinion) are tracked separately
+    in ``skipped_names`` when provided. They neither block nor count as
+    passed; the caller subtracts them from the passed-checks total.
+    """
     if verdict == "FAIL":
         (failed_required if is_required else failed_non_required).append(name)
     elif verdict == "PENDING":
         (pending_required if is_required else pending_non_required).append(name)
+    elif verdict == "SKIP" and skipped_names is not None:
+        skipped_names.append(name)
 
 
-def _count_passed_checks(contexts: list[dict], blocked: list[str]) -> int:
-    """Count distinct check names that are not in any blocking bucket.
+def _count_passed_checks(
+    contexts: list[dict],
+    blocked: list[str],
+    skipped: list[str] | None = None,
+) -> int:
+    """Count distinct check names that are not blocked AND not skipped.
 
-    Uses the post-dedupe blocked list to compute "everything else passed".
+    Uses the post-dedupe blocked list and (optionally) the skipped list
+    to compute "everything else passed". A SKIP-verdict name (CANCELLED-
+    only group) is no-opinion, NOT passed; without subtracting skipped,
+    the count overstates by the number of debounce-cancelled rollups.
     """
     distinct_names: set[str] = set()
     for ctx in contexts:
@@ -357,8 +383,10 @@ def _count_passed_checks(contexts: list[dict], blocked: list[str]) -> int:
             distinct_names.add(ctx.get("name", "unknown"))
         elif typename == "StatusContext":
             distinct_names.add(ctx.get("context", "unknown"))
-    blocked_set = set(blocked)
-    return len(distinct_names - blocked_set)
+    excluded = set(blocked)
+    if skipped:
+        excluded.update(skipped)
+    return len(distinct_names - excluded)
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +515,7 @@ def _evaluate_ci_checks(
     pending_required: list[str] = []
     failed_non_required: list[str] = []
     pending_non_required: list[str] = []
+    skipped_names: list[str] = []
     passed_checks = 0
     ci_passing = True
     rollup_rows = 0
@@ -507,11 +536,13 @@ def _evaluate_ci_checks(
                 pending_required=pending_required,
                 failed_non_required=failed_non_required,
                 pending_non_required=pending_non_required,
+                skipped_names=skipped_names,
             )
             passed_checks = _count_passed_checks(
                 contexts,
                 blocked=(failed_required + pending_required
                          + failed_non_required + pending_non_required),
+                skipped=skipped_names,
             )
 
     ci_passing = _append_ci_reasons(
