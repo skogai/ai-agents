@@ -50,10 +50,12 @@ that this codebase does not capture today. When per-event ground-truth
 labels exist, swap the fitness formula in ``compute_fitness`` without
 changing the threshold table.
 
-Exit codes (per AGENTS.md):
+Exit codes (per AGENTS.md / ADR-035):
     0 = ok
-    1 = logic error (input not parseable)
-    2 = config error (bad --source path)
+    1 = logic error (input parsed but wrong shape, e.g. not a JSON object
+        keyed by guard name)
+    2 = config error (bad --source path, missing input on stdin, or input
+        is not parseable JSON; the caller's environment is wrong)
 """
 
 from __future__ import annotations
