@@ -251,7 +251,23 @@ def _collect_all_threads(
             break
         cursor = page_info.get("endCursor")
         if not cursor:
-            break
+            # hasNextPage was true but endCursor is empty/null. Cannot
+            # advance — surface as truncation rather than a clean exit,
+            # since callers would otherwise see a "complete"-looking
+            # result that silently dropped pages 2+. Returns the same
+            # truncated=True signal as the cap-hit path below.
+            warnings.warn(
+                f"hasNextPage=true but endCursor empty for PR #{pr} "
+                f"on page {pages_seen}; result truncated at "
+                f"{len(aggregated)} threads. Reason: cursor_missing.",
+                stacklevel=2,
+            )
+            logger.warning(
+                "op=review_threads_failed pr=%d page=%d aggregated=%d "
+                "reason=cursor_missing",
+                pr, pages_seen, len(aggregated),
+            )
+            return aggregated, total_count, True
     else:
         # while-else fires when pages_seen reaches the cap without a break.
         # The last-seen page reported hasNextPage=true; surface it.
