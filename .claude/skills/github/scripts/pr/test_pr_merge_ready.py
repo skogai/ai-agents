@@ -10,10 +10,11 @@ Performs comprehensive merge readiness check:
 By default, only REQUIRED checks block merge. Non-required failing checks
 are reported but do not affect CanMerge unless --include-non-required is set.
 
-Multiple rows for the same check name (debounce supersession: a CANCELLED
+Multiple rows for the same check name (supersession: a CANCELLED or FAILURE
 run plus a later SUCCESS run) are deduplicated by name. The verdict per
-name is FAIL if any conclusion is a real failure; OK if any conclusion is
-SUCCESS / NEUTRAL / SKIPPED; PENDING if any status is IN_PROGRESS / PENDING.
+name is OK if any conclusion is SUCCESS / NEUTRAL / SKIPPED (superseding
+prior failures from re-runs); FAIL if any conclusion is a real failure and
+no passing row exists; PENDING if any status is IN_PROGRESS / PENDING.
 A name whose only conclusion is CANCELLED carries no opinion and does not
 block. The PR #1887 retrospective records four false-FAIL reports caused
 by counting CANCELLED debounce rows as failed required checks.
@@ -140,14 +141,16 @@ def _check_run_verdict(rows: list[dict]) -> str:
     """Reduce multiple CheckRun rows for one name to a single verdict.
 
     Verdict precedence:
-      1. FAIL  - any row has a real failure conclusion (not in the passing
+      1. OK    - any row has a passing conclusion (SUCCESS/NEUTRAL/SKIPPED).
+                 A re-run SUCCESS supersedes a stale FAILURE from an earlier
+                 run, closing the same false-FAIL class as the CANCELLED fix.
+      2. FAIL  - any row has a real failure conclusion (not in the passing
                  or no-opinion sets, e.g. FAILURE, TIMED_OUT, ACTION_REQUIRED).
-      2. OK    - any row has a passing conclusion.
       3. PENDING - any row has status != COMPLETED (and no passing row).
       4. SKIP  - all rows are CANCELLED (no real opinion); not blocking.
 
     Aligns with the brief in the PR #1887 retrospective: "OK if any SUCCESS
-    exists and no FAILURE; FAIL if any FAILURE; PENDING if any IN_PROGRESS."
+    exists." A passing conclusion from a re-run supersedes a prior failure.
     """
     has_failure = False
     has_pending = False
@@ -168,10 +171,10 @@ def _check_run_verdict(rows: list[dict]) -> str:
         else:
             has_failure = True
 
-    if has_failure:
-        return "FAIL"
     if has_passing:
         return "OK"
+    if has_failure:
+        return "FAIL"
     if has_pending:
         return "PENDING"
     return "SKIP"
@@ -182,7 +185,8 @@ def _status_context_verdict(rows: list[dict]) -> str:
 
     StatusContext does not surface CANCELLED; the typical states are SUCCESS,
     EXPECTED, PENDING, FAILURE, ERROR. We apply the same precedence as the
-    CheckRun verdict so callers can treat the two row types uniformly.
+    CheckRun verdict so callers can treat the two row types uniformly:
+    OK > FAIL > PENDING > SKIP.
     """
     has_failure = False
     has_pending = False
@@ -197,10 +201,10 @@ def _status_context_verdict(rows: list[dict]) -> str:
         else:
             has_failure = True
 
-    if has_failure:
-        return "FAIL"
     if has_passing:
         return "OK"
+    if has_failure:
+        return "FAIL"
     if has_pending:
         return "PENDING"
     return "SKIP"
