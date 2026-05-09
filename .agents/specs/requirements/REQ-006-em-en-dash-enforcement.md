@@ -269,24 +269,24 @@ before they reach bot reviewers via the PR.
 
 **Requirement Statement**
 
-WHEN `.claude/rules/universal.md` is edited to add the MUST NOT rule and `build_all.py` is run
+WHEN `.claude/rules/universal.md` is edited to add the MUST NOT rule and `build/scripts/generate_rules.py` is run
 THE SYSTEM SHALL produce `.github/instructions/universal.instructions.md` that contains the
 same rule text
 SO THAT Copilot CLI agents reading the mirror see the same prohibition.
 
 **Context**
 
-`build/scripts/build_all.py --check` validates that `universal.instructions.md` mirrors
+`build/scripts/generate_rules.py --what-if` validates that `universal.instructions.md` mirrors
 `universal.md`. Adding the prohibition rule to `universal.md` without regenerating the mirror
-causes `build_all.py --check` to exit 2 (staleness). Running `build_all.py` regenerates the
+causes `build/scripts/generate_rules.py --what-if` to exit 2 (staleness). Running `build/scripts/generate_rules.py` regenerates the
 mirror.
 
 **Acceptance Criteria**
 
 - [ ] `.claude/rules/universal.md` contains a MUST NOT rule prohibiting U+2014 and U+2013.
-- [ ] After running `python3 build/scripts/build_all.py`, `.github/instructions/
+- [ ] After running `python3 build/scripts/generate_rules.py`, `.github/instructions/
   universal.instructions.md` contains the same prohibition rule text.
-- [ ] `python3 build/scripts/build_all.py --check` exits 0 after regeneration.
+- [ ] `python3 build/scripts/generate_rules.py --what-if` exits 0 after regeneration.
 
 **Rationale**
 
@@ -295,7 +295,7 @@ Copilot-routed agents will continue authoring dashes.
 
 **Dependencies**
 
-- `build/scripts/build_all.py` (existing)
+- `build/scripts/generate_rules.py` (existing)
 - `.claude/rules/universal.md` (existing)
 - `.github/instructions/universal.instructions.md` (generated)
 

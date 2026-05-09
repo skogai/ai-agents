@@ -32,7 +32,7 @@ modifies `pre_pr.py`; parallel execution would cause merge conflicts.
 - `.githooks/commit-msg`: new bash hook for commit message dash check
 - `validate_dash_prohibition()` function in `scripts/validation/pre_pr.py`
 - MUST NOT rule addition to `.claude/rules/universal.md`
-- Mirror regeneration via `build/scripts/build_all.py`
+- Mirror regeneration via `build/scripts/generate_rules.py`
 - Regression tests under `tests/hooks/test_dash_guard.py`
 - Test fixtures under `tests/hooks/fixtures/`
 
@@ -63,14 +63,15 @@ agents from learning the rule before other milestones land.
 | File | Action | Description |
 |------|--------|-------------|
 | `.claude/rules/universal.md` | Edit | Add MUST NOT entry prohibiting U+2014 and U+2013 in the MUST NOT section |
-| `.github/instructions/universal.instructions.md` | Regenerate | Run `python3 build/scripts/build_all.py` after editing source |
+| `.github/instructions/universal.instructions.md` | Regenerate | Run `python3 build/scripts/generate_rules.py` after editing source |
 
 **Acceptance Criteria**
 
 - [ ] `.claude/rules/universal.md` MUST NOT section contains an entry prohibiting U+2014 and
   U+2013 with the replacement guidance (comma, period, colon, hyphen, or restructure).
-- [ ] `python3 build/scripts/build_all.py` exits 0 after the edit.
-- [ ] `python3 build/scripts/build_all.py --check` exits 0 (mirror is current).
+- [ ] `python3 build/scripts/generate_rules.py` exits 0 after the edit.
+- [ ] `git diff .github/instructions/universal.instructions.md` shows the new MUST NOT rule
+  added (confirms mirror was regenerated and reflects the source change).
 - [ ] The prohibition text in the mirror matches the source verbatim.
 
 **Implementation Notes**
@@ -80,8 +81,9 @@ Add after the last existing MUST NOT bullet. Rule text:
 > MUST NOT use em-dashes (U+2014) or en-dashes (U+2013) in any authored text. Use commas,
 > periods, colons, hyphens, or restructure the sentence instead.
 
-Run `python3 build/scripts/build_all.py` immediately after saving. Verify with `--check`.
-Do not hand-edit the generated `.github/instructions/universal.instructions.md`.
+Run `python3 build/scripts/generate_rules.py` immediately after saving. Verify with
+`git diff .github/instructions/universal.instructions.md`. Do not hand-edit the generated
+`.github/instructions/universal.instructions.md`.
 
 ---
 

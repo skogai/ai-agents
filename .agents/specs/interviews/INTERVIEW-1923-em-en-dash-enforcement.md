@@ -31,7 +31,7 @@ universal.md rule close the enforcement gap.
 ### Branch 3: Integrations
 
 - markdownlint-cli2: independent, no overlap. CONFIRMED.
-- build_all.py: propagates universal.md to Copilot mirror. CONFIRMED.
+- build/scripts/generate_rules.py: propagates universal.md to Copilot mirror. CONFIRMED.
 - pre_pr.py: new validate_dash_prohibition() function. CONFIRMED.
 - Hook placement: bash in .githooks/pre-commit (existing) and .githooks/commit-msg (new).
   NOT .claude/hooks/ (that is the Claude Code hook system, independent of git hooks). CONFIRMED.

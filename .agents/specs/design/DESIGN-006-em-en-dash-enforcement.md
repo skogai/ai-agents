@@ -121,6 +121,14 @@ standard git hook that fires for ALL git commits (human, Claude Code via Bash, C
 Code's `settings.json` hook system (PreToolUse, PostToolUse, etc.) is independent and does
 not support a `commit-msg` event type. The standard git hook is the correct mechanism.
 
+**ADR-042 exception**: AGENTS.md and `.claude/rules/universal.md` say "MUST NOT create new
+bash scripts." However, `.githooks/` scripts are the declared ADR-042 exception: git hooks
+require shell on non-Windows platforms. The existing `pre-commit` and `pre-push` hooks are
+bash for this same reason. A new `commit-msg` hook in `.githooks/` follows the same
+established exception. The hook has no `.sh` extension (consistent with `pre-commit` and
+`pre-push`), uses the existing `echo`/`grep` tools, and contains no new bash logic beyond
+what is already present in the other hooks.
+
 **Responsibilities**:
 
 - Accept `$1` (the draft commit message file path) from git.
@@ -186,9 +194,9 @@ N. MUST NOT use em-dashes (U+2014) or en-dashes (U+2013) in any authored text. U
    periods, colons, hyphens, or restructure the sentence.
 ```
 
-**Mirror propagation**: After editing `universal.md`, run `python3 build/scripts/build_all.py`
+**Mirror propagation**: After editing `universal.md`, run `python3 build/scripts/generate_rules.py`
 to regenerate `.github/instructions/universal.instructions.md`. Verify with
-`python3 build/scripts/build_all.py --check` (exits 0 when mirror is current).
+`git diff .github/instructions/universal.instructions.md` (should show the new MUST NOT rule).
 
 ### Component 5: Regression tests
 
@@ -218,7 +226,7 @@ to regenerate `.github/instructions/universal.instructions.md`. Verify with
 | Commit-msg detection | Bash grep in `.githooks/commit-msg` (new file) | Standard git hook, fires for all commits regardless of client (human, agent, CI) |
 | Locale safety | `LC_ALL=C.UTF-8` prefix on grep | Ensures UTF-8 byte matching on both GNU and BSD grep |
 | Branch-diff scan | Python `re` inside `pre_pr.py` `validate_dash_prohibition()` | Consistent with existing validator pattern in `pre_pr.py` |
-| Mirror propagation | `build/scripts/build_all.py` (existing) | Canonical generator; no new tooling |
+| Mirror propagation | `build/scripts/generate_rules.py` (existing) | Canonical generator; no new tooling |
 | Hook fail-open | Exit 0 on unhandled exception | Consistent with all existing hooks in repo |
 | Merge-commit skip | `git rev-parse -q --verify MERGE_HEAD` | Canonical pattern already in repo hooks |
 | Vendor exclusion | Prefix filter in Python before grep | Simpler and more testable than `grep --exclude-dir` in subprocess |
