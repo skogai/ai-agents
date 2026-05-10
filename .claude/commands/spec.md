@@ -139,6 +139,131 @@ If any criterion fires, the gate is loosened or removed in a follow-up PR.
 
 ---
 
+### Step 0.5: Memory-First Gate (blocking, runs after Step 0)
+
+<!-- step0.5:incomplete-without-2b -->
+
+After Step 0 passes, surface the backward-looking context the proposer should have read before drafting requirements. Step 0 asks "is this work demanded?" Step 0.5 asks "do we already know why the current state is the way it is?" Both gates fire, in order. The memory skill at `.claude/skills/memory/SKILL.md` line 104 declares the Memory-First Gate as BLOCKING; this section wires it into `/spec`.
+
+The gate composes three skills in sequence: `chestertons-fence` (frame: do not change without understanding why), `memory` (point-search prior decisions), `exploring-knowledge-graph` (multi-hop traversal of connected entities). Each answers a distinct question; the three layered together form the "Prior Art / Constraints" output that Step 6 carries into the PRD as its first section.
+
+#### Step 0.5 ProvisionalTier (auto-classified, no user prompt)
+
+Compute ProvisionalTier as `max(hours_tier, entity_tier)` from Step 0 answers. Used to depth-gate the knowledge-graph traversal without re-asking the proposer.
+
+Hours extraction: scan Q4 for a numeric estimate followed by `hour`, `hours`, `h`, `hr`, `day`, `days`, `week`, or `weeks` (case-insensitive). Days multiply by 8; weeks multiply by 40. If no numeric estimate is found, default `hours_tier = 2`.
+
+Hours mapping (boundaries strictly less-than; 8h falls in Tier 2, not Tier 3):
+
+| Q4 estimate | hours_tier |
+|---|---|
+| Less than 2 hours | 1 |
+| 2 to less than 8 hours | 2 |
+| 8 to less than 40 hours | 3 |
+| 40 to less than 160 hours | 4 |
+| 160 hours or more | 5 |
+
+Entity count: count distinct named entities, files, or system components mentioned in Q3 and Q4 answers (after normalization defined below). Map:
+
+| Distinct named entities in Q3+Q4 | entity_tier |
+|---|---|
+| 1 | 1 |
+| 2 to 3 | 2 |
+| 4 to 7 | 3 |
+| 8 to 15 | 4 |
+| More than 15 | 5 |
+
+ProvisionalTier = `max(hours_tier, entity_tier)`. Step 3 may classify the actual tier higher; if the upgrade requires Phase 5 traversal, append a supplemental sub-block (defined in the metrics section below).
+
+#### Step 0.5 topic extraction
+
+Topics are derived mechanically from Q3 and Q4 named entities. One topic per distinct entity. Normalization, applied in order:
+
+1. Strip leading path separators (`/`, `\`).
+2. Lowercase the string.
+3. Trim leading and trailing whitespace.
+4. Collapse internal separator runs (whitespace, `-`, `_`) to a single hyphen, so `spec pipeline`, `spec-pipeline`, and `spec_pipeline` all normalize to `spec-pipeline`.
+
+Example: `.claude/commands/spec.md` normalizes to `claude/commands/spec.md`. `spec pipeline` normalizes to `spec-pipeline`. These are distinct topics.
+
+The agent lists the derived topics explicitly in the Step 0.5 preamble before running any searches. Auto-mode adjudication (defined under entity discovery below) compares discovered entity names against Q answers using the same normalization.
+
+#### Step 0.5 skill invocation sequence
+
+Invoke the three skills in order. Each emits content into a named subsection of the PriorArtBlock.
+
+1. **chestertons-fence (frame)**. Invoke `Skill(skill="chestertons-fence")` with `target` set to the Q3 system path and `change` set to the Q4 wedge description. The skill runs git archaeology, PR/ADR search, and dependency analysis on the target. Output (PRESERVE | MODIFY | REPLACE | REMOVE recommendation plus rationale) feeds the `### Direct prior art from memory` subsection.
+2. **memory (point search)**. For each topic from the topic-extraction step, run `python3 .claude/skills/memory/scripts/search_memory.py "<query>"` at minimum 3 distinct query variants per topic. Distinct queries share no significant token roots; for example, for topic `spec-pipeline`: `"spec pipeline"`, `"spec command BLOCKING"`, `"clarification gate why"`. Result entries with non-zero matches feed the `### Direct prior art from memory` subsection.
+3. **exploring-knowledge-graph (traversal)**. Invoke `Skill(skill="exploring-knowledge-graph")` with the topic list. Depth matches ProvisionalTier:
+
+| ProvisionalTier | Phases run | Effect |
+|---|---|---|
+| 1 or 2 | Phases 1-2 (shallow) | Semantic entry plus 1-hop memory expansion |
+| 3 | Phases 1-4 (medium) | Adds entity discovery and entity relationships |
+| 4 or 5 | Phases 1-5 (deep) | Adds entity-linked memories |
+
+Discovered entities and projects feed the `### Connected context from exploring-knowledge-graph` subsection.
+
+#### Step 0.5 degradation rules
+
+| Failure | Behavior |
+|---|---|
+| `chestertons-fence` skill unavailable | Emit `### Coverage notes` entry: "chestertons-fence unavailable; git archaeology skipped; confidence low." Continue. |
+| Forgetful MCP unavailable for memory | Degrade to Serena-only via the existing `search_memory.py --lexical-only` fallback. Emit coverage note: "Forgetful MCP unavailable; Serena-only search; results may be incomplete." Continue. |
+| Forgetful MCP unavailable for exploring-knowledge-graph | Skip the skill (no fallback exists). Emit coverage note: "exploring-knowledge-graph skipped: Forgetful MCP unavailable." Continue. |
+| Memory search returns 0 results for a topic after at minimum 3 distinct queries | Emit coverage note for that topic: "no results for `<topic>` after 3 distinct queries; absence of evidence, not evidence of absence." Not a halt. |
+
+None of the above failures halt Step 0.5. They are recorded in the coverage notes subsection so Step 9 check 9d can distinguish "search ran and found nothing" from "search did not run".
+
+#### Step 0.5 entity adjudication
+
+When `exploring-knowledge-graph` discovers an entity or project name that does not appear in Step 0 Q1, Q3, or Q4 (after applying the topic normalization above), the proposer adjudicates each discovered entity as one of: `in-scope`, `out-of-scope`, or `blast-radius`.
+
+- `in-scope`: the entity is acknowledged as part of the spec's scope; record name and one-line relationship to the spec.
+- `out-of-scope`: the entity is deliberately excluded; record name and one-line reason.
+- `blast-radius`: the entity is connected but the proposer did not previously acknowledge it; record name and one-line risk note.
+
+In auto-mode (no human present), the agent applies case-insensitive string matching of the discovered entity name (after normalization) against the normalized Q1+Q3+Q4 answers. A match resolves the entity as `in-scope` automatically. No match resolves the entity as `blast-radius` (conservative). A human proposer in a later turn may override blast-radius classifications that auto-mode conservatively assigned.
+
+The blast-radius halt threshold differs by mode:
+
+| Mode | Blast-radius count to trigger halt |
+|---|---|
+| Human (proposer adjudicates each entity) | 2 or more |
+| Auto (string-match only) | 3 or more |
+
+The halt itself, the metrics tally, and the supplemental Phase 5 hook are defined in the next section of this gate (closing 2B).
+
+#### Step 0.5 PriorArtBlock output schema
+
+The gate emits a Markdown block embedded into the PRD as its first section, named `## Prior Art / Constraints`. The block has three required subsections; each must be present even if empty (an empty subsection contains a coverage note, not blank text):
+
+```markdown
+## Prior Art / Constraints (from Memory-First Gate)
+
+### Direct prior art from memory
+
+- ADR-NNN ("[title]"): [one-line summary]. Relevance: [one-line]. Decision: honor | adapt | propose-amend with rationale.
+- Episode YYYY-MM-DD ("[title]"): [one-line]. Relevance: [one-line]. Decision: [as above].
+- Causal pattern: [name]. Relevance: [one-line]. Decision: [as above].
+- (chestertons-fence recommendation: PRESERVE | MODIFY | REPLACE | REMOVE; rationale.)
+
+### Connected context from exploring-knowledge-graph
+
+- Connected entity: [normalized name, type]. Adjudication: [in-scope | out-of-scope | blast-radius]. Note: [one-line].
+- Linked project: [name]. Why it matters: [one-line].
+- (Traversal depth: shallow | medium | deep, matched to Tier N.)
+
+### Coverage notes
+
+- [Topic `<name>`]: [searched N variants; results: count]. Confidence: [high if N >= 3 distinct queries with no shared roots, low otherwise].
+- [Skill or MCP availability notes per the degradation rules above.]
+```
+
+This block is the input to Step 9 check 9d, which verifies that at least one subsection has either evidence content or a justified coverage note.
+
+---
+
 1. Clarify the problem. Step 0 already captured demand (Q1), status quo (Q2), specificity (Q3), wedge (Q4), observation (Q5), and future-fit (Q6). **Do not re-elicit Q1-Q6 here.** Step 1 scope is narrower: clarify constraints, non-functional requirements, integration touch points, and edge cases not already addressed by the Q4 wedge.
 2. **Run the adversarial requirements interview**: Invoke Skill(skill="requirements-interview") to walk the design tree before any further analysis. The skill grills the user on user stories, data model, integrations, failure modes, security, observability, and scope boundaries. For every question it must propose a recommended answer; if the codebase can answer it (grep the repo first), it does so without asking. Output is a structured PRD that every downstream step consumes. Carry the PRD forward unchanged through steps 3-9; do not drop sections.
 3. **Classify complexity tier**: Task(subagent_type="analyst"): Read `.claude/skills/analyze/references/engineering-complexity-tiers.md`. Using the structured PRD from step 2, classify the problem as Tier 1-5 based on scope, ambiguity, cross-team dependencies, and reversibility. Return the tier number, rationale, and recommended spec depth. Use this to calibrate remaining steps:

@@ -137,6 +137,11 @@
       "timestamp": "2026-05-10T03:00:00Z",
       "action": "test gate 5 fixes applied",
       "detail": "Gate 5 DX review found 2 HIGH + 3 MED findings: DESIGN hours table boundary contradicted REQ strict-less-than rule; TASK line 225 worked example self-contradicted; AC-09 deferral text differed across files; sequence diagram missing halt arrow; topic normalization incomplete for multi-word entities. All 5 fixes applied. 2 LOW findings deferred to M2."
+    },
+    {
+      "timestamp": "2026-05-10T04:00:00Z",
+      "action": "M2 commit 2A drafted",
+      "detail": "Inserted Step 0.5 scaffold into .claude/commands/spec.md between Step 0 closing rule (line 140) and Step 1 numbered list (now line 267). Covers AC-01 through AC-08: heading order, ProvisionalTier mapping tables, topic extraction with 4-step normalization, 3-skill invocation sequence, depth-table for knowledge-graph, degradation rules, entity adjudication with auto-mode and human-mode thresholds, PriorArtBlock 3-subsection schema. Includes guard string <!-- step0.5:incomplete-without-2b --> for AC-12 false-positive prevention until 2B lands."
     }
   ],
   "endingCommit": "",
