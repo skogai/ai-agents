@@ -15,7 +15,7 @@
 - [x] M2: Insert Step 0.5 block in `.claude/commands/spec.md` (2 commits: 1d60205f scaffold, b97378f1 halt+supplemental+metrics)
 - [x] M3: Append check 9d to Step 9 pre-mortem (serialized after M2)
 - [x] M4: Add static validation tests using heading-anchored parser (30 tests, 95 pass total inc. existing)
-- [ ] M5: Manual + pytest-promoted validation of D1-D14 dynamic checks
+- [x] M5: Manual + pytest-promoted validation of D1-D14 dynamic checks (8 promoted, 6 manual with eval-harness follow-on)
 
 ## Milestones (revised post-critique)
 
@@ -154,6 +154,7 @@ Serial chain. M3 was originally parallel with M2 but pre-mortem F6 (merge confli
 | 2026-05-10 | M2 complete. Step 0.5 inserted into .claude/commands/spec.md across 2 commits (1d60205f scaffold AC-01 to AC-08; b97378f1 halt+supplemental+metrics AC-09 to AC-11). Guard string introduced and removed. spec.md grew from 199 to 339 lines. | implementer |
 | 2026-05-10 | M3 complete. Check 9d appended to Step 9 pre-mortem list (AC-12). 9a/9b/9c untouched. 9d FAIL conditions include guard-string detection per plan. Step 9 narrative updated to cover 9a-9d. | implementer |
 | 2026-05-10 | M4 complete. step0_5_parser.py + test_spec_step0_5.py committed; 30 tests pass. Existing test_spec_step0.py byte-identity tests preserved by mirroring Step 0.5 + 9d into Copilot CLI SKILL.md (deferred-item resolved early). 8h-tier contradiction in REQ/DESIGN/spec.md prose corrected: 8h is Tier 3 per mapping. Total tests/commands/: 95 pass. | implementer |
+| 2026-05-10 | M5 complete. Promoted D2/D8/D10/D11 to pytest (12 new tests): D2 ProvisionalTier from "4-6 hours" + 2 entities = Tier 2; D8 step0_5-halt block parser with field-set/trigger validation; D10/D11 metrics tally line parser with state/trigger consistency checks. Manual checks D1, D6, D7, D9, D12, D13, D14 require live /spec invocation or Forgetful MCP simulation; tracked as candidates for ADR-057 LLM eval harness follow-on. Total tests/commands/: 107 pass. | implementer |
 
 ## Risk Register
 

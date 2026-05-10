@@ -190,3 +190,83 @@ def has_guard_string(spec_text: str) -> bool:
     Step 9 check 9d treats this as an automatic FAIL.
     """
     return GUARD_STRING in spec_text
+
+
+HALT_BLOCK_FIELDS = ("trigger", "check", "evidence", "test_failed", "deferral")
+VALID_HALT_TRIGGERS = frozenset({"H6", "H7", "H8", "H9", "H10", "H11"})
+
+_HALT_BLOCK_RE = re.compile(
+    r"```step0_5-halt\n(?P<body>.*?)\n```",
+    re.DOTALL,
+)
+_HALT_FIELD_RE = re.compile(r"^(\w+):\s*(.+)$", re.MULTILINE)
+
+
+def parse_halt_block(text: str) -> dict[str, str]:
+    """Parse a fenced `step0_5-halt` block into its 5 fields.
+
+    Validates that the block contains exactly the 5 fields documented
+    in REQ-008 AC-09: trigger, check, evidence, test_failed, deferral.
+    Returns a dict mapping field name to value. Raises ValueError if
+    the block is missing, malformed, or has the wrong field set.
+
+    Used by D8/D10/D11 dynamic-check promotion: tests can validate
+    the format of halt blocks emitted by `/spec` runs without the LLM
+    in-the-loop.
+    """
+    match = _HALT_BLOCK_RE.search(text)
+    if match is None:
+        raise ValueError(
+            "no fenced ```step0_5-halt code block found in input"
+        )
+    body = match.group("body")
+    fields = dict(_HALT_FIELD_RE.findall(body))
+    missing = set(HALT_BLOCK_FIELDS) - set(fields)
+    extra = set(fields) - set(HALT_BLOCK_FIELDS)
+    if missing or extra:
+        raise ValueError(
+            f"halt block field set wrong: missing={sorted(missing)}, "
+            f"extra={sorted(extra)}"
+        )
+    if fields["trigger"] not in VALID_HALT_TRIGGERS:
+        raise ValueError(
+            f"halt trigger {fields['trigger']!r} not in valid set "
+            f"{sorted(VALID_HALT_TRIGGERS)}"
+        )
+    return fields
+
+
+METRICS_TALLY_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) "
+    r"\| (?P<state>pass|fail) "
+    r"\| (?P<trigger>none|H\d+) "
+    r"\| (?P<check>none|.+)$",
+)
+
+
+def parse_tally_line(line: str) -> dict[str, str]:
+    """Parse one STEP-0.5-METRICS.md tally line into its components.
+
+    Returns dict with keys timestamp, state, trigger, check. Raises
+    ValueError if the line does not match the canonical format
+    `<ISO-8601> | <pass|fail> | <trigger-or-none> | <check-or-none>`.
+    Enforces that pass-state lines have trigger=none and check=none;
+    fail-state lines have trigger != none.
+
+    Used by D10/D11 dynamic-check promotion.
+    """
+    match = METRICS_TALLY_RE.match(line.rstrip("\n"))
+    if match is None:
+        raise ValueError(f"tally line does not match canonical format: {line!r}")
+    parts = match.groupdict()
+    if parts["state"] == "pass":
+        if parts["trigger"] != "none" or parts["check"] != "none":
+            raise ValueError(
+                "pass-state tally line must have trigger=none and check=none"
+            )
+    else:
+        if parts["trigger"] == "none":
+            raise ValueError(
+                "fail-state tally line must have a non-none trigger"
+            )
+    return parts

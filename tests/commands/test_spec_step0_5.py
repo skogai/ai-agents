@@ -21,11 +21,15 @@ import pytest
 
 from tests.commands.step0_5_parser import (
     GUARD_STRING,
+    HALT_BLOCK_FIELDS,
+    VALID_HALT_TRIGGERS,
     compute_provisional_tier,
     extract_step0_5_block,
     extract_step0_5_subsection,
     extract_step9_block,
     has_guard_string,
+    parse_halt_block,
+    parse_tally_line,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -329,3 +333,126 @@ def test_compute_provisional_tier_eight_hours_is_tier_3():
 
 def test_compute_provisional_tier_no_hours_defaults_to_tier_2():
     assert compute_provisional_tier("", 1) == 2
+
+
+# ---------------------------------------------------------------------------
+# Dynamic-check promotion (TASK-008-5 D-list)
+#
+# 8 of 14 D-checks are deterministic enough to assert without an LLM in
+# the loop. The remaining 6 (D1, D6, D7, D9, D12, D13, D14) require live
+# /spec invocation or MCP simulation; those are tracked manual checks
+# and become candidates for an LLM eval harness (ADR-057).
+# ---------------------------------------------------------------------------
+
+
+# D2 (AC-02, AC-05): Q4 = "4-6 hours"; entity count = 2.
+# Expect ProvisionalTier = 2; depth = Phases 1-2.
+def test_d2_q4_4_to_6_hours_with_two_entities_yields_tier_2():
+    assert compute_provisional_tier("4-6 hours", 2) == 2
+
+
+def test_d2_q4_4_to_8_hours_with_two_entities_yields_tier_3():
+    """Boundary expansion: 4-8 hours picks 8 (last numeric), so Tier 3."""
+    assert compute_provisional_tier("4-8 hours", 2) == 3
+
+
+# D8 (AC-09 halt): a step0_5-halt block emitted on H11 must have exactly
+# 5 fields with valid trigger.
+def test_d8_halt_block_parses_with_five_fields():
+    sample = (
+        "```step0_5-halt\n"
+        "trigger: H11\n"
+        "check: AC-09 blast-radius adjudication\n"
+        "evidence: 3 unmatched entities marked blast-radius (a, b, c)\n"
+        "test_failed: blast-radius count >= auto-mode threshold (3)\n"
+        "deferral: Revise Step 0 Q4 to name blast-radius entities or "
+        "add explicit out-of-scope entries; then re-run Step 0.5.\n"
+        "```"
+    )
+    fields = parse_halt_block(sample)
+    assert set(fields) == set(HALT_BLOCK_FIELDS)
+    assert fields["trigger"] == "H11"
+    assert fields["trigger"] in VALID_HALT_TRIGGERS
+
+
+def test_d8_halt_block_rejects_unknown_trigger():
+    sample = (
+        "```step0_5-halt\n"
+        "trigger: H99\n"
+        "check: AC-09\n"
+        "evidence: x\n"
+        "test_failed: y\n"
+        "deferral: z\n"
+        "```"
+    )
+    with pytest.raises(ValueError, match="not in valid set"):
+        parse_halt_block(sample)
+
+
+def test_d8_halt_block_rejects_missing_field():
+    sample = (
+        "```step0_5-halt\n"
+        "trigger: H11\n"
+        "check: AC-09\n"
+        "evidence: x\n"
+        "test_failed: y\n"
+        "```"
+    )
+    with pytest.raises(ValueError, match="missing"):
+        parse_halt_block(sample)
+
+
+def test_d8_halt_block_rejects_extra_field():
+    sample = (
+        "```step0_5-halt\n"
+        "trigger: H11\n"
+        "check: AC-09\n"
+        "evidence: x\n"
+        "test_failed: y\n"
+        "deferral: z\n"
+        "extra: w\n"
+        "```"
+    )
+    with pytest.raises(ValueError, match="extra"):
+        parse_halt_block(sample)
+
+
+def test_d8_halt_block_rejects_missing_fence():
+    with pytest.raises(ValueError, match="no fenced"):
+        parse_halt_block("trigger: H11\ncheck: AC-09\n")
+
+
+# D10 (AC-11 pass): tally line for pass case.
+def test_d10_pass_tally_line_parses():
+    line = "2026-05-10T04:30:00Z | pass | none | none"
+    fields = parse_tally_line(line)
+    assert fields["state"] == "pass"
+    assert fields["trigger"] == "none"
+    assert fields["check"] == "none"
+
+
+def test_d10_pass_tally_line_rejects_non_none_trigger():
+    line = "2026-05-10T04:30:00Z | pass | H11 | none"
+    with pytest.raises(ValueError, match="pass-state"):
+        parse_tally_line(line)
+
+
+# D11 (AC-11 halt): tally line for halt case.
+def test_d11_halt_tally_line_parses():
+    line = "2026-05-10T05:15:00Z | fail | H11 | AC-09 blast-radius adjudication"
+    fields = parse_tally_line(line)
+    assert fields["state"] == "fail"
+    assert fields["trigger"] == "H11"
+    assert "AC-09" in fields["check"]
+
+
+def test_d11_halt_tally_line_rejects_none_trigger():
+    line = "2026-05-10T05:15:00Z | fail | none | AC-09"
+    with pytest.raises(ValueError, match="fail-state"):
+        parse_tally_line(line)
+
+
+def test_d10_d11_tally_line_rejects_malformed_timestamp():
+    line = "2026/05/10 04:30 | pass | none | none"
+    with pytest.raises(ValueError, match="canonical format"):
+        parse_tally_line(line)
