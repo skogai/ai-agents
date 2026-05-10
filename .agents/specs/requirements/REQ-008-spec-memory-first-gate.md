@@ -81,7 +81,7 @@ Integer 1 through 5. Computed as max(hours_tier(Q4), entity_tier(Q3+Q4)). Determ
 
 Hours extraction from Q4 free-text: the agent looks for a numeric estimate followed by "hour", "hours", "h", "hr", "day", or "days" (case-insensitive). Days multiply by 8. If no numeric estimate is found, ProvisionalTier defaults to Tier 2.
 
-Hours mapping (boundaries are strictly less-than, so 8h falls in Tier 2 not Tier 3): less than 2 hours = Tier 1; 2 hours to less than 8 hours = Tier 2; 8 hours to less than 40 hours = Tier 3; 40 hours to less than 160 hours = Tier 4; 160 hours or more = Tier 5.
+Hours mapping (upper bounds are strict less-than, so 8h falls in Tier 3, not Tier 2): less than 2 hours = Tier 1; 2 hours to less than 8 hours = Tier 2; 8 hours to less than 40 hours = Tier 3; 40 hours to less than 160 hours = Tier 4; 160 hours or more = Tier 5.
 
 Entity count mapping: 1 entity = Tier 1; 2-3 entities = Tier 2; 4-7 entities = Tier 3; 8-15 entities = Tier 4; more than 15 entities = Tier 5.
 

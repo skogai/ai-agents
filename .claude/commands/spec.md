@@ -151,7 +151,7 @@ Compute ProvisionalTier as `max(hours_tier, entity_tier)` from Step 0 answers. U
 
 Hours extraction: scan Q4 for a numeric estimate followed by `hour`, `hours`, `h`, `hr`, `day`, `days`, `week`, or `weeks` (case-insensitive). Days multiply by 8; weeks multiply by 40. If no numeric estimate is found, default `hours_tier = 2`.
 
-Hours mapping (boundaries strictly less-than; 8h falls in Tier 2, not Tier 3):
+Hours mapping (upper bounds strictly less-than; 8h falls in Tier 3, not Tier 2):
 
 | Q4 estimate | hours_tier |
 |---|---|

@@ -80,7 +80,7 @@ ProvisionalTier is computed at the start of Step 0.5 from two inputs available w
 
 Hours mapping table:
 
-Boundaries are strictly less-than. 8h falls in Tier 2, not Tier 3.
+Upper bounds are strict less-than. 8h falls in Tier 3 (range `8 to less than 40 hours`), not Tier 2.
 
 | Q4 estimate | Tier |
 |---|---|

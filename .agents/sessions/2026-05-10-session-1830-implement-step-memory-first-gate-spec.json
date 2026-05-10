@@ -152,6 +152,11 @@
       "timestamp": "2026-05-10T06:00:00Z",
       "action": "M3 commit drafted",
       "detail": "Appended Check 9d (Prior Art / Constraints elicitation) to Step 9 pre-mortem list. 9d FAIL conditions: (a) section absent; (b) all 3 subsections empty without coverage note; (c) guard-string still present (Step 0.5 partial). Updated Step 9 narrative to reference 9a/9b/9c/9d. 9a/9b/9c bodies untouched per plan."
+    },
+    {
+      "timestamp": "2026-05-10T07:00:00Z",
+      "action": "M4 complete",
+      "detail": "Wrote tests/commands/step0_5_parser.py (compute_provisional_tier + section extractors) and tests/commands/test_spec_step0_5.py (S1-S12 plus parametrized parser cases). 30 tests pass. Fixed 8h-tier contradiction (REQ/DESIGN/spec.md prose): 8h is Tier 3 per mapping; parenthetical aligned. Mirrored Step 0.5 + 9d into Copilot CLI SKILL.md to preserve existing byte-identity tests; this resolves deferred-item early (originally out-of-scope per REQ-008). All 95 tests in tests/commands/ pass."
     }
   ],
   "endingCommit": "",
