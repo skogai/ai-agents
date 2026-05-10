@@ -169,15 +169,19 @@ Serial chain. M3 was originally parallel with M2 but pre-mortem F6 (merge confli
 | Auto-mode blast-radius false halts block automated /spec | LOW (post-mitigation) | MED | Threshold raised to 3 in auto-mode. Manual override path documented. |
 | Concurrent writes to STEP-0.5-METRICS.md | LOW | LOW | Same risk profile as STEP-0-METRICS.md. Single-author repo; concurrent /spec invocations rare. Defer locking to follow-on. |
 
-## Deferred (out of scope for this plan)
+## Deferred (filed as sub-issues of #1951)
 
 - ~~Copilot CLI twin (`src/copilot-cli/skills/spec/SKILL.md`) update for Step 0.5~~ DONE in M4 to satisfy byte-identity tests
-- **ADR-060 for Step 0.5 Memory-First Gate** (Arch F2 from /review): defer because adr-review skill is BLOCKING and adds multi-agent debate cost; file as follow-on issue. Justification: spec.md kill-criteria already document removal path; ADR-007 declares the principle this gate implements.
-- Promoting D6/D7/D9/D12/D13/D14 to pytest (tracked issue, ADR-057 eval harness)
-- File locking on STEP-0.5-METRICS.md (Sec F3 suggestion, low risk on single-author repo)
-- Entity name normalization alias table
-- AC-08 auto-mode whole-token equality match instead of substring (Sec F2 suggestion; substring is documented behavior at spec.md:223; harden in follow-on)
-- Halt block PII/secret redaction pre-emit (Sec F4 suggestion; tracked for security follow-on)
+- ADR-060 for Step 0.5 Memory-First Gate (Arch F2): #1971
+- Promote LLM-required D-checks D1/D6/D7/D9/D12/D13/D14 to eval harness (QA F1 + remaining D-checks): #1972
+- Whole-token equality match instead of substring (Sec F2): #1973
+- STEP-0.5-METRICS.md O_NOFOLLOW + flock hardening (Sec F3): #1974
+- Halt block PII/secret redaction pre-emit (Sec F4): #1975
+- Parser delimiter brittleness (Arch F3): #1976
+- PriorArtBlock heading parenthetical contract (Arch F4): #1977
+- Entity name normalization alias table: #1978
+
+All 8 sub-issues linked to parent #1951 via GitHub sub-issue API (GraphQL `addSubIssue` mutation).
 
 ## Blockers
 

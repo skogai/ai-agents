@@ -177,6 +177,11 @@
       "timestamp": "2026-05-10T09:30:00Z",
       "action": "review fixes test layer",
       "detail": "Test-layer fixes ready for commit: Arch F1 (byte-identity mirror test for Step 0.5); QA F2 (entity_count boundary parametrize, 10 cases); QA F4 (phases_needed + supplemental_phase_5_warranted helpers, 13 boundary tests). Deferred: ADR-060 (Arch F2; multi-agent debate cost), Sec F2/F3/F4 suggestions, QA F1 (LLM-only behavioral check), Arch F3/F4. tests/commands/: 131 pass."
+    },
+    {
+      "timestamp": "2026-05-10T10:00:00Z",
+      "action": "deferred items filed as sub-issues",
+      "detail": "Filed 8 sub-issues of #1951 covering all deferred work: #1971 ADR-060, #1972 LLM eval harness for 7 dynamic D-checks, #1973 whole-token equality match (Sec F2), #1974 STEP-0.5-METRICS.md hardening (Sec F3), #1975 halt-block redaction (Sec F4), #1976 parser delimiter brittleness (Arch F3), #1977 PriorArtBlock heading contract (Arch F4), #1978 entity name alias table. Linked via GraphQL addSubIssue mutation. Parent #1951 sub-issue count = 8."
     }
   ],
   "endingCommit": "",
