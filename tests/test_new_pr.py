@@ -306,7 +306,7 @@ class TestRunValidations:
             run_validations(str(tmp_path), "main", "feat/branch")
 
     def test_agents_changed_with_session_log_runs_validator(self, tmp_path):
-        changed = ".agents/sessions/2025-01-01-session-01.md\n"
+        changed = ".agents/sessions/2025-01-01-session-01.json\n"
         validate_script = tmp_path / "scripts" / "validate_session_json.py"
         validate_script.parent.mkdir(parents=True)
         validate_script.write_text("# mock")
@@ -321,7 +321,7 @@ class TestRunValidations:
             run_validations(str(tmp_path), "main", "feat/branch")
 
     def test_agents_changed_session_validation_fails_exits_1(self, tmp_path):
-        changed = ".agents/sessions/2025-01-01-session-01.md\n"
+        changed = ".agents/sessions/2025-01-01-session-01.json\n"
         validate_script = tmp_path / "scripts" / "validate_session_json.py"
         validate_script.parent.mkdir(parents=True)
         validate_script.write_text("# mock")
