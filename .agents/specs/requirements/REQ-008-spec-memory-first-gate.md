@@ -101,7 +101,7 @@ Invoked via `Skill(skill="chestertons-fence")` with `target` set to the Q3 syste
 
 Invoked for each topic derived from Step 0 Q3+Q4 named entities, using at minimum 3 distinct query variants per topic. Runs through the memory skill interface.
 
-**Topic definition**: one topic per distinct named entity, file, or system component mentioned in the proposer's Q3 and Q4 answers. Normalization: strip leading path separators, lowercase, trim whitespace. For example, `.claude/commands/spec.md` normalizes to `claude/commands/spec.md`; this is a different topic from `spec pipeline`. The agent lists the derived topics explicitly in the Step 0.5 preamble before running any searches.
+**Topic definition**: one topic per distinct named entity, file, or system component mentioned in the proposer's Q3 and Q4 answers. Normalization rule (applied in order): (1) strip leading path separators (`/`, `\`); (2) lowercase the string; (3) trim leading and trailing whitespace; (4) collapse internal separator runs (whitespace, `-`, `_`) to a single hyphen so `spec pipeline`, `spec-pipeline`, and `spec_pipeline` all normalize to `spec-pipeline`. For example, `.claude/commands/spec.md` normalizes to `claude/commands/spec.md`; this is a different topic from `spec-pipeline`. The agent lists the derived topics explicitly in the Step 0.5 preamble before running any searches. Auto-mode adjudication (AC-08) compares discovered entity names against Q answers using the same normalization.
 
 If Forgetful MCP is unavailable, degrade to Serena-only search and log the degradation in coverage notes. If a topic returns 0 results after 3+ distinct queries, emit a coverage note for that topic. Idempotent.
 
@@ -188,7 +188,7 @@ SO THAT the proposer explicitly acknowledges or excludes discovered connections.
 ### AC-09: Two or more blast-radius entities trigger halt
 
 WHEN the proposer marks 2 or more discovered entities as blast-radius (human mode) OR the auto-mode adjudication resolves 3 or more entities as blast-radius,
-THE SYSTEM SHALL emit a step0_5-halt block with trigger H11 and deferral "revise Step 0 Q4 to name blast-radius entities or add explicit out-of-scope entries; then re-run Step 0.5",
+THE SYSTEM SHALL emit a step0_5-halt block with trigger H11 and deferral "Revise Step 0 Q4 to name blast-radius entities or add explicit out-of-scope entries; then re-run Step 0.5.",
 SO THAT specs with underspecified blast radius cannot proceed to Step 1.
 
 ### AC-10: Supplemental Phase 5 appended on tier upgrade

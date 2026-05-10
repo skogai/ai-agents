@@ -80,13 +80,17 @@ ProvisionalTier is computed at the start of Step 0.5 from two inputs available w
 
 Hours mapping table:
 
+Boundaries are strictly less-than. 8h falls in Tier 2, not Tier 3.
+
 | Q4 estimate | Tier |
 |---|---|
 | Less than 2 hours | 1 |
-| 2 to 8 hours | 2 |
-| 8 to 40 hours | 3 |
-| 40 to 160 hours | 4 |
-| More than 160 hours | 5 |
+| 2 to less than 8 hours | 2 |
+| 8 to less than 40 hours | 3 |
+| 40 to less than 160 hours | 4 |
+| 160 hours or more | 5 |
+
+If no numeric hours estimate is found in Q4, ProvisionalTier defaults to Tier 2 (matches REQ-008 hours extraction rule).
 
 Entity count mapping table:
 
@@ -124,7 +128,7 @@ ProvisionalTier = max(hours_tier, entity_tier). When Q4 does not contain a parse
   3. exploring-knowledge-graph at depth matching ProvisionalTier.
 - Define degradation behavior for each skill: if chestertons-fence is unavailable, log skip and continue; if Forgetful MCP is unavailable, degrade to Serena-only and log; if exploring-knowledge-graph is unavailable, skip and log.
 - Define the entity adjudication step: present each discovered entity not in Q1+Q3+Q4 to the proposer; proposer assigns one of (in-scope, out-of-scope, blast-radius).
-- Define halt trigger H11: when 2 or more discovered entities are marked blast-radius, emit a step0_5-halt block with deferral "revise Step 0 Q4 to name blast-radius entities or add explicit out-of-scope entries; then re-run Step 0.5".
+- Define halt trigger H11: when 2 or more discovered entities are marked blast-radius, emit a step0_5-halt block with canonical deferral text "Revise Step 0 Q4 to name blast-radius entities or add explicit out-of-scope entries; then re-run Step 0.5." (capitalized R, terminating period; sole canonical form, mirrored verbatim by REQ-008 AC-09 line 191 and TASK-008 line 93).
 - Define the step0_5-halt block schema: five fields (trigger, check, evidence, test_failed, deferral); info-string "step0_5-halt".
 - Define zero-result coverage note: when memory returns 0 results for a topic after 3+ queries, emit a coverage note naming the topic in the "### Coverage notes" subsection.
 - Define the PriorArtBlock output format: a markdown section "## Prior Art / Constraints" with three required subsections: "### Direct prior art from memory", "### Connected context from exploring-knowledge-graph", "### Coverage notes". This block is appended to the PRD immediately after the Step 0 block.
@@ -177,9 +181,17 @@ proposer         spec.md         chestertons-fence   memory       exploring-kg
    |<-- adjudicate entities (if any new ones) ---|                     |
    |-- adjudication -->|                         |                     |
    |                |-- check blast-radius count  |                     |
-   |                |-- if >=2: emit H11 halt     |                     |
+   |                |   threshold (human=2, auto=3)|                    |
+   |                |                             |                     |
+   |                | [HALT branch: count >= threshold]                 |
+   |                |-- emit step0_5-halt H11 ----->|                   |
+   |<-- step0_5-halt deferral text ---|            |                   |
+   |                |-- append metrics tally (fail|H11|AC-09) --->     |
+   |                |-- STOP; do not proceed to Step 1                  |
+   |                |                             |                     |
+   |                | [PASS branch: count < threshold]                  |
    |                |-- assemble PriorArtBlock    |                     |
-   |                |-- append metrics tally      |                     |
+   |                |-- append metrics tally (pass|none|none) --->      |
    |<-- PriorArtBlock + proceed to Step 1 --------|                    |
 ```
 

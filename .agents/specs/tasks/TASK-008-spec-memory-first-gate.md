@@ -218,11 +218,11 @@ None (validation only; evidence documented in PR description).
 
 Static checks are encoded in `tests/commands/test_spec_step0_5.py` and run in the existing pytest suite. Dynamic spot-checks (D1-D14) require live `/spec` invocations and are documented as supplemental evidence in the PR description. Both layers are required before the PR is marked ready for review.
 
-The ProvisionalTier reference implementation in `step0_5_parser.py` is tested with at minimum:
-- Q4 = "6 hours"; entity count = 1. Expect Tier 2 (max(2, 1) = 2).
-- Q4 = "3 days"; entity count = 5. Expect Tier 3 (max(2, 3) = 3). (3 days = 24 hours = Tier 3; entity count 5 = Tier 3.)
-- Q4 = "no hours estimate"; entity count = 10. Expect Tier 4 (entity count 10 = Tier 4; hours defaults to entity tier).
-- Q4 = "2 weeks"; entity count = 2. Expect Tier 3 (2 weeks = 80 hours = Tier 4; entity count 2 = Tier 2; max = Tier 4). Correction: 2 weeks = 80 hours falls in the 40-160 range = Tier 4; entity count 2 = Tier 2; max(4, 2) = 4.
+The ProvisionalTier reference implementation in `step0_5_parser.py` is tested with at minimum (boundaries are strictly less-than per REQ-008 hours mapping):
+- `compute_provisional_tier("6 hours", 1)` returns 2. Hours: 6 falls in 2 to <8 = Tier 2. Entity: 1 = Tier 1. max(2, 1) = 2.
+- `compute_provisional_tier("3 days", 5)` returns 3. Hours: 3 days = 24 hours, falls in 8 to <40 = Tier 3. Entity: 5 = Tier 3. max(3, 3) = 3.
+- `compute_provisional_tier("vague description with no number", 10)` returns 4. Hours: no numeric match, defaults to Tier 2. Entity: 10 = Tier 4. max(2, 4) = 4.
+- `compute_provisional_tier("2 weeks", 2)` returns 4. Hours: 2 weeks = 80 hours, falls in 40 to <160 = Tier 4. Entity: 2 = Tier 2. max(4, 2) = 4.
 
 ## Effort Estimate
 

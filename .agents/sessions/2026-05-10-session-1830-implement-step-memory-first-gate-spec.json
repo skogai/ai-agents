@@ -132,6 +132,11 @@
       "timestamp": "2026-05-10T02:30:00Z",
       "action": "commit 1 landed",
       "detail": "94b50b6f: spec artifacts (REQ-008, DESIGN-008, TASK-008, INTERVIEW-1951, session log, episode). Committing plan artifacts next (req-008-step-0-5-memory-first-gate.md, req-008-m1-skill-contracts.md, STEP-0-METRICS.md)."
+    },
+    {
+      "timestamp": "2026-05-10T03:00:00Z",
+      "action": "test gate 5 fixes applied",
+      "detail": "Gate 5 DX review found 2 HIGH + 3 MED findings: DESIGN hours table boundary contradicted REQ strict-less-than rule; TASK line 225 worked example self-contradicted; AC-09 deferral text differed across files; sequence diagram missing halt arrow; topic normalization incomplete for multi-word entities. All 5 fixes applied. 2 LOW findings deferred to M2."
     }
   ],
   "endingCommit": "",
