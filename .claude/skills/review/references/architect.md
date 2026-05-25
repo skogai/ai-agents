@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/architect.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: architect
+role: architect
+version: 1.0.0
+description: PR review focused on architectural design, system structure, and ADR conformance
+---
 
 # Architect Review Task
 

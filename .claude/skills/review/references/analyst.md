@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/analyst.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: analyst
+role: analyst
+version: 1.0.0
+description: PR review focused on code quality, impact analysis, and maintainability
+---
 
 # Analyst Review Task
 

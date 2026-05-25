@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/roadmap.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: roadmap
+role: roadmap
+version: 1.0.0
+description: PR review focused on strategic alignment, feature scope, and user value
+---
 
 # Roadmap Review Task
 

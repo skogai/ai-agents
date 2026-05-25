@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/security.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: security
+role: security
+version: 1.0.0
+description: PR review focused on CWE patterns, OWASP, secrets, and threat modeling
+---
 
 # Security Review Task
 

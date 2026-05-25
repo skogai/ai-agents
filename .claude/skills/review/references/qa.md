@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/qa.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: qa
+role: qa
+version: 1.0.0
+description: PR review focused on test coverage, error handling, and quality gates
+---
 
 # QA Review Task
 

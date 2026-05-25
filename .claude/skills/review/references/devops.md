@@ -1,6 +1,9 @@
-<!-- GENERATED -- DO NOT EDIT -->
-<!-- Source: .claude/skills/review/references/devops.md -->
-<!-- Run: python3 build/scripts/generate_pr_quality_prompts.py -->
+---
+name: devops
+role: devops
+version: 1.0.0
+description: PR review focused on CI/CD, build pipelines, and infrastructure
+---
 
 # DevOps Review Task
 
