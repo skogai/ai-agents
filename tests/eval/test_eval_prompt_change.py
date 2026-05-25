@@ -379,7 +379,7 @@ class TestShippedScenariosValid:
         scenarios = eval_mod.load_scenarios(
             str(REPO_ROOT / "tests" / "evals" / "spec-scenarios.json")
         )
-        assert {s["id"] for s in scenarios} == {
+        required_d_check_ids = {
             "D1",
             "D6",
             "D7",
@@ -388,6 +388,11 @@ class TestShippedScenariosValid:
             "D13",
             "D14",
         }
+        scenario_ids = {s["id"] for s in scenarios}
+        missing = required_d_check_ids - scenario_ids
+        assert not missing, (
+            f"spec-scenarios.json missing required Step 0.5 D-check ids: {sorted(missing)}"
+        )
 
 
 # ---------------------------------------------------------------------------
