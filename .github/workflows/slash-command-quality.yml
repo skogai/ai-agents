@@ -66,16 +66,12 @@ jobs:
         if: |
           github.event_name == 'pull_request' &&
           needs.check-paths.outputs.spec_evals_changed == 'true' &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          env.ANTHROPIC_API_KEY != ''
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY secret not available in this context, skipping /spec behavioral evals"
-            exit 0
-          fi
-          python3 scripts/eval/eval-prompt-change.py --prompt .claude/commands/spec.md --scenarios tests/evals/spec-scenarios.json --base-ref "$BASE_REF"
+        run: python3 scripts/eval/eval-prompt-change.py --prompt .claude/commands/spec.md --scenarios tests/evals/spec-scenarios.json --base-ref "$BASE_REF"
 
   skip-validation:
     runs-on: ubuntu-24.04-arm
