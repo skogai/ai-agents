@@ -86,7 +86,9 @@ what was skipped (with reason).
 
 Run the ecosystem-specific commands above. Capture structured output (JSON where
 available; parse tabular for `dotnet`). On scan failure (command missing, auth
-error, timeout), log the failure and continue to the next ecosystem.
+error, timeout), log the failure and continue to the next ecosystem. A failure
+in one ecosystem does not abort the others; Exit 3 (Step 5) fires only when every
+detected ecosystem fails to scan.
 
 ### Step 3: Classify
 
@@ -138,7 +140,9 @@ Emit a structured report:
 
 - Exit 0 if no Critical or High findings.
 - Exit 1 if any Critical or High finding (gate signal for CI/release workflows).
-- Exit 3 if a scan command failed (external/infra error per ADR-035).
+- Exit 3 only when at least one ecosystem was detected and every detected
+  ecosystem failed to scan (external/infra error per ADR-035). Partial failures
+  (some ecosystems scanned, others failed) still exit 0 or 1 based on findings.
 
 ## Anti-Patterns
 
