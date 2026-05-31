@@ -245,11 +245,11 @@ class TestBootstrap:
         )
         assert result.returncode == 0
 
-    def test_bootstrap_missing_lib_exits_2(self, tmp_path):
-        """CLAUDE_PLUGIN_ROOT pointing at an empty dir: lib absent -> exit 2.
+    def test_bootstrap_missing_lib_exits_0(self, tmp_path):
+        """CLAUDE_PLUGIN_ROOT pointing at an empty dir: lib absent -> exit 0 (fail-open).
 
-        PreToolUse bootstrap fails closed (cannot decide without the lib),
-        matching the canonical invoke_skill_first_guard.py bootstrap.
+        ADR-062 Section 5 requires fail-open on bootstrap failure:
+        a navigation guard must never wedge a turn.
         """
         hook_path = str(HOOK_DIR / "invoke_lsp_read_guard.py")
         env = dict(os.environ)
@@ -261,5 +261,5 @@ class TestBootstrap:
             text=True,
             env=env,
         )
-        assert result.returncode == 2
+        assert result.returncode == 0
         assert "Plugin lib directory not found" in result.stderr

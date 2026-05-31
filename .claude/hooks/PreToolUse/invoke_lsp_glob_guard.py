@@ -82,7 +82,8 @@ if _lib_dir is None or not os.path.isdir(_lib_dir):  # pragma: no cover - lib al
         f"Plugin lib directory not found: {_lib_dir} (CLAUDE_PLUGIN_ROOT={_plugin_root!r})",
         file=sys.stderr,
     )
-    sys.exit(2)
+    # Fail-open: a navigation guard must never wedge a turn on bootstrap failure.
+    sys.exit(0)
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 

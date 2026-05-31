@@ -2,11 +2,15 @@
 
 The hook is the trusted lifecycle reset signal for the conditional LSP-first
 enforcement layer. It ALWAYS exits 0 (SessionStart hooks never block) and clears
-the gate-state file for the current cwd via ``lsp_gate_state.reset_state``.
+the gate-state file for the project directory via ``lsp_gate_state.reset_state``.
+
+The hook uses ``get_project_directory()`` (matching the usage tracker and read
+guard) to ensure all gates use the same state key, avoiding the bug where
+session reset clears a different state file than the one guards read/write.
 
 Coverage targets (100%, every path):
-  - cwd resolution: JSON cwd field (string), missing cwd, non-string cwd,
-    non-dict input, empty/whitespace stdin, tty stdin, malformed JSON.
+  - project directory: uses get_project_directory() which honors CLAUDE_PROJECT_DIR
+    or git root, matching the usage tracker and read guard.
   - kill switch: SKIP_LSP_GATE=true bypasses the reset, leaves state untouched.
   - mode: LSP_GATE_MODE=warn still runs the reset (advisory parity only).
   - reset outcome: success (file cleared, idempotent on missing), failure
@@ -51,34 +55,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch):
     """Ensure no inherited kill switch / mode env leaks between tests."""
     monkeypatch.delenv("SKIP_LSP_GATE", raising=False)
     monkeypatch.delenv("LSP_GATE_MODE", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     yield
-
-
-# ---------------------------------------------------------------------------
-# resolve_cwd: pure cwd selection logic
-# ---------------------------------------------------------------------------
-
-
-class TestResolveCwd:
-    def test_uses_json_cwd_string(self):
-        assert invoke_lsp_session_reset.resolve_cwd({"cwd": "/repo/here"}) == "/repo/here"
-
-    def test_missing_cwd_falls_back_to_getcwd(self):
-        with patch(f"{MOD}.os.getcwd", return_value="/fallback"):
-            assert invoke_lsp_session_reset.resolve_cwd({}) == "/fallback"
-
-    def test_non_string_cwd_falls_back(self):
-        with patch(f"{MOD}.os.getcwd", return_value="/fallback"):
-            assert invoke_lsp_session_reset.resolve_cwd({"cwd": 123}) == "/fallback"
-
-    def test_empty_string_cwd_falls_back(self):
-        with patch(f"{MOD}.os.getcwd", return_value="/fallback"):
-            assert invoke_lsp_session_reset.resolve_cwd({"cwd": ""}) == "/fallback"
-
-    def test_non_dict_input_falls_back(self):
-        with patch(f"{MOD}.os.getcwd", return_value="/fallback"):
-            assert invoke_lsp_session_reset.resolve_cwd(["not", "a", "dict"]) == "/fallback"
-            assert invoke_lsp_session_reset.resolve_cwd(None) == "/fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -97,82 +75,35 @@ class TestKillSwitch:
         assert "SKIP_LSP_GATE=true" in capsys.readouterr().err
 
     def test_skip_lsp_gate_non_true_does_not_bypass(
-        self, monkeypatch: pytest.MonkeyPatch, mock_stdin: Callable[[str], None]
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         # Only the exact string "true" bypasses; anything else runs the reset.
         monkeypatch.setenv("SKIP_LSP_GATE", "1")
-        mock_stdin("")
-        with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-            assert invoke_lsp_session_reset.main() == 0
+        with patch(f"{MOD}.get_project_directory", return_value="/workspace"):
+            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
+                assert invoke_lsp_session_reset.main() == 0
         mock_reset.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# main: fail-open stdin handling
+# main: project directory resolution (uses get_project_directory, not stdin)
 # ---------------------------------------------------------------------------
 
 
-class TestStdinHandling:
-    def test_tty_stdin_resets_process_cwd(self):
-        with patch(f"{MOD}.sys.stdin", MagicMock(isatty=lambda: True)):
-            with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
-                with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-                    assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
-
-    def test_empty_stdin_resets_process_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        mock_stdin("")
-        with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
+class TestProjectDirectory:
+    def test_uses_get_project_directory(self, capsys):
+        """The hook uses get_project_directory() to match usage tracker and read guard."""
+        with patch(f"{MOD}.get_project_directory", return_value="/my/project"):
             with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
                 assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
+        mock_reset.assert_called_once_with("/my/project")
 
-    def test_whitespace_stdin_resets_process_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        mock_stdin("   \n\t  ")
-        with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
-            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-                assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
-
-    def test_malformed_json_resets_process_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        mock_stdin("{not valid json")
-        with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
-            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-                assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
-
-    def test_valid_json_with_cwd_resets_that_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        mock_stdin(json.dumps({"cwd": "/given/repo", "session_id": "abc"}))
+    def test_honors_claude_project_dir_env(self, monkeypatch: pytest.MonkeyPatch):
+        """CLAUDE_PROJECT_DIR is honored via get_project_directory()."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/env/specified/project")
         with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
             assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/given/repo")
-
-    def test_valid_json_missing_cwd_resets_process_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        mock_stdin(json.dumps({"session_id": "abc"}))
-        with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
-            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-                assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
-
-    def test_valid_json_non_dict_resets_process_cwd(
-        self, mock_stdin: Callable[[str], None]
-    ):
-        # JSON parses but is a list, not a dict -> resolve_cwd falls back.
-        mock_stdin(json.dumps(["unexpected", "shape"]))
-        with patch(f"{MOD}.os.getcwd", return_value="/proc/cwd"):
-            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-                assert invoke_lsp_session_reset.main() == 0
-        mock_reset.assert_called_once_with("/proc/cwd")
+        mock_reset.assert_called_once_with("/env/specified/project")
 
 
 # ---------------------------------------------------------------------------
@@ -181,37 +112,34 @@ class TestStdinHandling:
 
 
 class TestResetOutcomes:
-    def test_reset_success_exits_0(self, mock_stdin: Callable[[str], None], capsys):
-        mock_stdin(json.dumps({"cwd": "/repo"}))
-        with patch(f"{MOD}.reset_state", return_value=True):
-            assert invoke_lsp_session_reset.main() == 0
+    def test_reset_success_exits_0(self, capsys):
+        with patch(f"{MOD}.get_project_directory", return_value="/repo"):
+            with patch(f"{MOD}.reset_state", return_value=True):
+                assert invoke_lsp_session_reset.main() == 0
         assert "reset=True" in capsys.readouterr().err
 
-    def test_reset_failure_still_exits_0(
-        self, mock_stdin: Callable[[str], None], capsys
-    ):
+    def test_reset_failure_still_exits_0(self, capsys):
         # reset_state returning False (OSError swallowed in lib) must not block.
-        mock_stdin(json.dumps({"cwd": "/repo"}))
-        with patch(f"{MOD}.reset_state", return_value=False):
-            assert invoke_lsp_session_reset.main() == 0
+        with patch(f"{MOD}.get_project_directory", return_value="/repo"):
+            with patch(f"{MOD}.reset_state", return_value=False):
+                assert invoke_lsp_session_reset.main() == 0
         assert "reset=False" in capsys.readouterr().err
 
     def test_warn_mode_still_runs_reset(
-        self, monkeypatch: pytest.MonkeyPatch, mock_stdin: Callable[[str], None], capsys
+        self, monkeypatch: pytest.MonkeyPatch, capsys
     ):
+        # warn mode affects read/grep/glob guards, not the reset itself.
         monkeypatch.setenv("LSP_GATE_MODE", "warn")
-        mock_stdin(json.dumps({"cwd": "/repo"}))
-        with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
-            assert invoke_lsp_session_reset.main() == 0
+        with patch(f"{MOD}.get_project_directory", return_value="/repo"):
+            with patch(f"{MOD}.reset_state", return_value=True) as mock_reset:
+                assert invoke_lsp_session_reset.main() == 0
         mock_reset.assert_called_once_with("/repo")
         assert "mode=warn" in capsys.readouterr().err
 
-    def test_default_mode_is_block(
-        self, mock_stdin: Callable[[str], None], capsys
-    ):
-        mock_stdin(json.dumps({"cwd": "/repo"}))
-        with patch(f"{MOD}.reset_state", return_value=True):
-            assert invoke_lsp_session_reset.main() == 0
+    def test_default_mode_is_block(self, capsys):
+        with patch(f"{MOD}.get_project_directory", return_value="/repo"):
+            with patch(f"{MOD}.reset_state", return_value=True):
+                assert invoke_lsp_session_reset.main() == 0
         assert "mode=block" in capsys.readouterr().err
 
 
@@ -221,19 +149,14 @@ class TestResetOutcomes:
 
 
 class TestExceptionFailOpen:
-    def test_reset_state_raising_fails_open(
-        self, mock_stdin: Callable[[str], None], capsys
-    ):
-        mock_stdin(json.dumps({"cwd": "/repo"}))
-        with patch(f"{MOD}.reset_state", side_effect=RuntimeError("boom")):
-            assert invoke_lsp_session_reset.main() == 0
+    def test_reset_state_raising_fails_open(self, capsys):
+        with patch(f"{MOD}.get_project_directory", return_value="/repo"):
+            with patch(f"{MOD}.reset_state", side_effect=RuntimeError("boom")):
+                assert invoke_lsp_session_reset.main() == 0
         assert "lsp-session-reset error: RuntimeError" in capsys.readouterr().err
 
-    def test_stdin_read_raising_fails_open(self, capsys):
-        broken = MagicMock()
-        broken.isatty.return_value = False
-        broken.read.side_effect = OSError("pipe died")
-        with patch(f"{MOD}.sys.stdin", broken):
+    def test_get_project_directory_raising_fails_open(self, capsys):
+        with patch(f"{MOD}.get_project_directory", side_effect=OSError("git failed")):
             assert invoke_lsp_session_reset.main() == 0
         assert "lsp-session-reset error: OSError" in capsys.readouterr().err
 
@@ -245,27 +168,27 @@ class TestExceptionFailOpen:
 
 class TestRealReset:
     def test_clears_existing_state_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path, mock_stdin: Callable[[str], None]
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         from hook_utilities import lsp_gate_state
 
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        cwd = "/some/project"
+        project_dir = "/some/project"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", project_dir)
         # Seed a "surgical mode" state that a new session must not inherit.
         lsp_gate_state.write_state(
-            cwd, {"warmup_done": True, "nav_count": 5, "read_count": 9}
+            project_dir, {"warmup_done": True, "nav_count": 5, "read_count": 9}
         )
-        assert lsp_gate_state.state_path(cwd).exists()
+        assert lsp_gate_state.state_path(project_dir).exists()
 
-        mock_stdin(json.dumps({"cwd": cwd}))
         assert invoke_lsp_session_reset.main() == 0
-        assert not lsp_gate_state.state_path(cwd).exists()
+        assert not lsp_gate_state.state_path(project_dir).exists()
 
     def test_idempotent_when_no_state_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path, mock_stdin: Callable[[str], None]
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        mock_stdin(json.dumps({"cwd": "/never/seen"}))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/never/seen")
         # No file exists; reset is a no-op that still exits 0.
         assert invoke_lsp_session_reset.main() == 0
 
@@ -290,19 +213,27 @@ class TestModuleAsScript:
             env=run_env,
         )
 
-    def test_subprocess_empty_stdin_exits_0(self):
-        result = self._run("")
-        assert result.returncode == 0
-
-    def test_subprocess_valid_json_exits_0(self, tmp_path):
+    def test_subprocess_empty_stdin_exits_0(self, tmp_path):
         result = self._run(
-            json.dumps({"cwd": "/some/project"}),
-            env={"XDG_STATE_HOME": str(tmp_path)},
+            "",
+            env={"CLAUDE_PROJECT_DIR": "/some/project", "XDG_STATE_HOME": str(tmp_path)},
         )
         assert result.returncode == 0
 
-    def test_subprocess_malformed_json_exits_0(self):
-        result = self._run("{garbage")
+    def test_subprocess_valid_json_exits_0(self, tmp_path):
+        # stdin JSON is now ignored; the hook uses get_project_directory()
+        result = self._run(
+            json.dumps({"cwd": "/some/project"}),
+            env={"CLAUDE_PROJECT_DIR": "/actual/project", "XDG_STATE_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0
+
+    def test_subprocess_malformed_json_exits_0(self, tmp_path):
+        # Malformed JSON doesn't matter since stdin is not read for cwd
+        result = self._run(
+            "{garbage",
+            env={"CLAUDE_PROJECT_DIR": "/some/project", "XDG_STATE_HOME": str(tmp_path)},
+        )
         assert result.returncode == 0
 
     def test_subprocess_kill_switch_exits_0(self):
@@ -313,9 +244,10 @@ class TestModuleAsScript:
         assert result.returncode == 0
         assert "SKIP_LSP_GATE=true" in result.stderr
 
-    def test_main_guard_via_runpy(self):
+    def test_main_guard_via_runpy(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         """Cover the ``sys.exit(main())`` line via in-process runpy execution."""
-        with patch(f"{MOD}.sys.stdin", MagicMock(isatty=lambda: True)):
-            with pytest.raises(SystemExit) as exc_info:
-                runpy.run_path(self.HOOK_PATH, run_name="__main__")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/some/project")
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_path(self.HOOK_PATH, run_name="__main__")
         assert exc_info.value.code == 0
