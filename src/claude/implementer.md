@@ -276,7 +276,7 @@ You cannot delegate. Return to orchestrator with:
 
 - `[BLOCKED]`: Plan missing, acceptance criteria absent, or conflicting constraints not resolvable without human input.
 - `[SECURITY_FLAG]`: Encountered CWE/OWASP surface (path traversal, injection, auth boundary, secrets) that requires security agent review before proceeding.
-- `[NEEDS_DECOMPOSITION]`: Task is XL complexity or touches more than 5 files; return an estimated breakdown.
+- `[NEEDS_DECOMPOSITION]`: Task is XL complexity, touches more than 5 files, or context budget is nearly spent; return an estimated breakdown with remaining steps.
 - `[NEEDS_DESIGN_REVIEW]`: Implementation reveals a pattern conflict or ADR ambiguity; do not guess, escalate.
 
 2. **Confidence**: HIGH / MEDIUM / LOW with reasoning
