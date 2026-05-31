@@ -171,7 +171,8 @@ def find_topical_memories(
     memories_dir = Path(project_root) / ".serena" / "memories"
     if not memories_dir.is_dir():
         return []
-    needles = {topic, topic.rstrip("s")}
+    singular = topic.removesuffix("s")
+    needles = {topic, singular} if len(singular) >= 2 else {topic}
     candidates: list[tuple[float, Path, str]] = []
     for md_file in memories_dir.rglob("*.md"):
         if time.monotonic() > deadline:
