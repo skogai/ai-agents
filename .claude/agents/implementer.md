@@ -300,7 +300,7 @@ Any of these means you are near the limit. Do not push through. Checkpoint.
 2. Record progress in the session log: what is done, what remains, the next concrete step. That is the state the next session inherits.
 3. If work remains and the budget is nearly spent, stop and return `[NEEDS_DECOMPOSITION]` to the orchestrator with the remaining steps listed. Do not start a step you cannot finish.
 
-**Degrade, do not fail silently.** If you cannot complete the full task within budget, deliver the part you verified and name the part you did not reach. A smaller correct result with an explicit gap is worth more than a larger result you cannot stand behind. The `PreCompact` hook checkpoints state before compaction, but it cannot recover work you never committed; the commit is yours to make.
+**Degrade, do not fail silently.** If you cannot complete the full task within budget, deliver the part you verified and name the part you did not reach. A smaller correct result with an explicit gap is worth more than a larger result you cannot stand behind. On platforms that support the `PreCompact` hook, it checkpoints state before compaction, but it cannot recover work you never committed; the commit is yours to make.
 
 ## Handoff
 
