@@ -100,7 +100,8 @@ from hook_utilities.lsp_gate_state import reset_state  # noqa: E402
 def main() -> int:
     """Main hook entry point. Always returns 0 (SessionStart never blocks)."""
     try:
-        if os.environ.get("SKIP_LSP_GATE") == "true":
+        # Normalized check for consistent behavior with other ADR-062 guards.
+        if os.environ.get("SKIP_LSP_GATE", "").strip().lower() == "true":
             # Kill switch: bypass the gate entirely, leave state untouched.
             print("[SKIP] lsp-session-reset: SKIP_LSP_GATE=true", file=sys.stderr)
             return 0

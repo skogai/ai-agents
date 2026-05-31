@@ -53,7 +53,8 @@ if _lib_dir not in sys.path:
 
 from hook_utilities import get_project_directory  # noqa: E402
 from hook_utilities.guards import skip_if_consumer_repo  # noqa: E402
-from hook_utilities.lsp_gate_state import record_read  # noqa: E402
+from hook_utilities.lsp_gate_state import is_gated_target, record_read  # noqa: E402
+from hook_utilities.lsp_provider import SYMBOLS_OVERVIEW, detect_providers  # noqa: E402
 
 
 def main() -> int:
@@ -88,6 +89,25 @@ def main() -> int:
             return 0
 
         project_dir = get_project_directory()
+
+        # Only track reads that the guard would gate (Bug fix: ADR-062 Section 3/4).
+        # Non-gated reads (dotfiles, out-of-repo, no provider) must not inflate
+        # the read_files count, otherwise tier thresholds trigger early.
+        if not is_gated_target(file_path, project_dir):
+            print(
+                f"LSP read tracker: non-gated target, not tracked: {file_path}",
+                file=sys.stderr,
+            )
+            return 0
+
+        providers = detect_providers(file_path, SYMBOLS_OVERVIEW, project_dir)
+        if not providers:
+            print(
+                f"LSP read tracker: no overview provider, not tracked: {file_path}",
+                file=sys.stderr,
+            )
+            return 0
+
         state = record_read(project_dir, file_path)
 
         print(

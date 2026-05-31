@@ -222,15 +222,74 @@ def record_nav(cwd: str) -> dict:
     return state
 
 
+def is_gated_target(file_path: str, project_dir: str) -> bool:
+    """True if ``file_path`` is an in-repo, non-dotfile, non-scratch target.
+
+    ADR-062 Section 7 always-bypass set: out-of-repo paths, dotfiles, and
+    TMPDIR/scratch are never gated. Paths are resolved before comparison so
+    ``..`` traversal cannot escape the bypass (CWE-22 safe). A path that cannot
+    be resolved or compared degrades to NOT gated (fail-open: allow).
+    """
+    if not file_path:
+        return False
+    try:
+        resolved = Path(file_path).resolve()
+        root = Path(project_dir).resolve()
+    except (OSError, ValueError):
+        return False
+
+    # Out-of-repo targets are never gated.
+    if root not in resolved.parents and resolved != root:
+        return False
+
+    # Scratch under TMPDIR is never gated (mktemp staging).
+    tmpdir = os.environ.get("TMPDIR", "").strip()
+    if tmpdir:
+        try:
+            tmp_root = Path(tmpdir).resolve()
+            if tmp_root == resolved or tmp_root in resolved.parents:
+                return False
+        except (OSError, ValueError):
+            return False
+
+    # Dotfiles and dot-directory members (.serena/, .git/, .agents/, ...) are
+    # not gated: they are config/state, not navigable source under this gate's
+    # intent, and the kit's path-bypass list covered the same shape.
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return False
+    if any(part.startswith(".") for part in relative.parts):
+        return False
+    return True
+
+
+def normalize_path(file_path: str, cwd: str) -> str:
+    """Normalize a file path to a stable resolved form for deduplication.
+
+    Resolves to absolute path so relative and absolute paths for the same file
+    match. Returns the original path on resolution failure (fail-open).
+    """
+    if not file_path:
+        return file_path
+    try:
+        return str(Path(file_path).resolve())
+    except (OSError, ValueError):
+        return file_path
+
+
 def record_read(cwd: str, file_path: str) -> dict:
     """Record a gated Read of ``file_path``. Returns the new state.
 
-    Appends the file to ``read_files`` (deduplicated) and keeps ``read_count``
-    in sync with the unique set, matching the kit's read tracking.
+    Appends the file to ``read_files`` (deduplicated by normalized path) and
+    keeps ``read_count`` in sync with the unique set, matching the kit's read
+    tracking. Paths are normalized to resolved absolute form so the same file
+    read via different path representations counts once.
     """
     state = read_state(cwd)
-    if file_path and file_path not in state["read_files"]:
-        state["read_files"].append(file_path)
+    normalized = normalize_path(file_path, cwd)
+    if normalized and normalized not in state["read_files"]:
+        state["read_files"].append(normalized)
     state["read_count"] = len(state["read_files"])
     write_state(cwd, state)
     return state

@@ -230,7 +230,8 @@ def emit_block(subagent_type: str) -> None:
 def main() -> int:
     """Main hook entry point. Returns exit code (0 = allow, 2 = block)."""
     # Kill switch (ADR-062 Section 6); mirrors SKIP_QA_GATE/SKIP_ADR_GATE.
-    if os.environ.get("SKIP_LSP_GATE") == "true":
+    # Normalized check for consistent behavior with other ADR-062 guards.
+    if os.environ.get("SKIP_LSP_GATE", "").strip().lower() == "true":
         return 0
 
     if skip_if_consumer_repo("lsp-pre-delegation-guard"):
