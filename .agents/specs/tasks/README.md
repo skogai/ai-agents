@@ -18,6 +18,7 @@ Task documents break designs into small, implementable units with:
 Pattern: `TASK-NNN-[kebab-case-name].md`
 
 Examples:
+
 - `TASK-001-implement-token-endpoint.md`
 - `TASK-002-add-pkce-validation.md`
 - `TASK-003-create-refresh-logic.md`
@@ -92,13 +93,13 @@ updated: YYYY-MM-DD
 
 ## Complexity Estimates
 
-| Size | Hours | Story Points | Description |
-|------|-------|--------------|-------------|
-| XS | 1-2 | 1 | Trivial change, minimal risk |
-| S | 2-4 | 2-3 | Simple change, well-understood |
-| M | 4-8 | 5 | Moderate complexity, some unknowns |
-| L | 8-16 | 8 | Complex change, multiple files |
-| XL | 16+ | 13 | Very complex, consider splitting |
+| Size | Hours | Story Points | Description                        |
+| ---- | ----- | ------------ | ---------------------------------- |
+| XS   | 1-2   | 1            | Trivial change, minimal risk       |
+| S    | 2-4   | 2-3          | Simple change, well-understood     |
+| M    | 4-8   | 5            | Moderate complexity, some unknowns |
+| L    | 8-16  | 8            | Complex change, multiple files     |
+| XL   | 16+   | 13           | Very complex, consider splitting   |
 
 ## Example
 
@@ -128,6 +129,7 @@ Implement the `/oauth/token` endpoint that exchanges authorization codes for acc
 ## Scope
 
 ### In Scope
+
 - [ ] Create TokenController with /oauth/token endpoint
 - [ ] Validate authorization code
 - [ ] Verify PKCE code verifier
@@ -135,6 +137,7 @@ Implement the `/oauth/token` endpoint that exchanges authorization codes for acc
 - [ ] Return token response (access_token, refresh_token, expires_in)
 
 ### Out of Scope
+
 - Token refresh logic (deferred to TASK-002)
 - Token revocation (deferred to TASK-003)
 
@@ -171,12 +174,14 @@ Implement the `/oauth/token` endpoint that exchanges authorization codes for acc
 ## Testing Strategy
 
 ### Unit Tests
+
 - Valid token request returns tokens
 - Invalid code returns 400
 - PKCE mismatch returns 400
 - Token structure validation
 
 ### Integration Tests
+
 - Full OAuth flow from code to token
 - Error scenarios (expired code, replay attack)
 ```
@@ -199,5 +204,5 @@ Tasks are validated for:
 
 ---
 
-*Version: 1.0*
-*Created: 2025-12-18*
+_Version: 1.0_
+_Created: 2025-12-18_

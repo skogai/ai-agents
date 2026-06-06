@@ -45,10 +45,10 @@ Use `python3 .claude/skills/chestertons-fence/scripts/investigate.py` to automat
 
 ### Alternatives Considered
 
-| Alternative | Pros | Cons | Why Not Chosen |
-|-------------|------|------|----------------|
-| [Option 1] | [Pros] | [Cons] | [Reason] |
-| [Option 2] | [Pros] | [Cons] | [Reason] |
+| Alternative | Pros   | Cons   | Why Not Chosen |
+| ----------- | ------ | ------ | -------------- |
+| [Option 1]  | [Pros] | [Cons] | [Reason]       |
+| [Option 2]  | [Pros] | [Cons] | [Reason]       |
 
 ### Trade-offs
 
@@ -74,11 +74,11 @@ Use `python3 .claude/skills/chestertons-fence/scripts/investigate.py` to automat
 
 [Required when changing canonical source files (e.g., SESSION-PROTOCOL.md). List all components that depend on the changed file and describe the required updates.]
 
-| Component | Dependency Type | Required Update | Risk |
-|-----------|----------------|-----------------|------|
+| Component                     | Dependency Type   | Required Update    | Risk              |
+| ----------------------------- | ----------------- | ------------------ | ----------------- |
 | [e.g., Session log templates] | [Direct/Indirect] | [What must change] | [Low/Medium/High] |
-| [e.g., Validation scripts] | [Direct/Indirect] | [What must change] | [Low/Medium/High] |
-| [e.g., CI workflows] | [Direct/Indirect] | [What must change] | [Low/Medium/High] |
+| [e.g., Validation scripts]    | [Direct/Indirect] | [What must change] | [Low/Medium/High] |
+| [e.g., CI workflows]          | [Direct/Indirect] | [What must change] | [Low/Medium/High] |
 
 ## Implementation Notes
 
@@ -102,14 +102,14 @@ Use `python3 .claude/skills/chestertons-fence/scripts/investigate.py` to automat
 
 ### Overlap Analysis
 
-| Existing Agent | Capability Overlap | Overlap % | Differentiation |
-|----------------|-------------------|-----------|-----------------|
-| [Agent name] | [Overlapping capabilities] | [%] | [How this agent differs] |
+| Existing Agent | Capability Overlap         | Overlap % | Differentiation          |
+| -------------- | -------------------------- | --------- | ------------------------ |
+| [Agent name]   | [Overlapping capabilities] | [%]       | [How this agent differs] |
 
 ### Entry Criteria
 
-| Scenario | Priority | Confidence |
-|----------|----------|------------|
+| Scenario      | Priority | Confidence   |
+| ------------- | -------- | ------------ |
 | [When to use] | P0/P1/P2 | High/Med/Low |
 
 ### Explicit Limitations
@@ -119,12 +119,12 @@ Use `python3 .claude/skills/chestertons-fence/scripts/investigate.py` to automat
 
 ### Success Metrics
 
-| Metric | Target | Measurement |
-|--------|--------|-------------|
+| Metric   | Target   | Measurement      |
+| -------- | -------- | ---------------- |
 | [Metric] | [Target] | [How to measure] |
 
 ---
 
-*Template Version: 1.1*
-*Created: 2025-12-13*
-*GitHub Issue: #8*
+_Template Version: 1.1_
+_Created: 2025-12-13_
+_GitHub Issue: #8_

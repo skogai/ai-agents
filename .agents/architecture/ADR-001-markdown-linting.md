@@ -14,15 +14,15 @@ The vs-code-agents repository contains 59 markdown files (agent templates, docum
 
 ### Violation Summary
 
-| Rule | Description | Count | Severity |
-|------|-------------|-------|----------|
-| MD040 | Code blocks without language identifiers | 286+ | High |
-| MD013 | Line length > 80 characters | 200+ | Medium |
-| MD031 | Missing blank lines around code blocks | 150+ | Medium |
-| MD032 | Missing blank lines around lists | 100+ | Medium |
-| MD022 | Missing blank lines around headings | 100+ | Medium |
-| MD033 | Inline HTML (generic types) | 3+ | High |
-| MD060 | Table column style issues | 50+ | Low |
+| Rule  | Description                              | Count | Severity |
+| ----- | ---------------------------------------- | ----- | -------- |
+| MD040 | Code blocks without language identifiers | 286+  | High     |
+| MD013 | Line length > 80 characters              | 200+  | Medium   |
+| MD031 | Missing blank lines around code blocks   | 150+  | Medium   |
+| MD032 | Missing blank lines around lists         | 100+  | Medium   |
+| MD022 | Missing blank lines around headings      | 100+  | Medium   |
+| MD033 | Inline HTML (generic types)              | 3+    | High     |
+| MD060 | Table column style issues                | 50+   | Low      |
 
 ## Decision
 
@@ -41,6 +41,7 @@ Create `.markdownlint-cli2.yaml` in the repository root with rules appropriate f
 ### 2. Create Markdown Linting Requirements Document
 
 Create `docs/markdown-linting.md` documenting:
+
 - Required rules and their rationale
 - Common violations and fixes
 - Code block language identifier reference
@@ -49,6 +50,7 @@ Create `docs/markdown-linting.md` documenting:
 ### 3. Fix All Violations
 
 Priority order:
+
 1. **MD040**: Add language identifiers to all code blocks
 2. **MD033**: Wrap generic types in backticks (`ArrayPool<T>` -> `` `ArrayPool<T>` ``)
 3. **MD031**: Add blank lines around code blocks
@@ -121,24 +123,26 @@ config:
 
 ### Code Block Language Reference
 
-| Content Type | Language Identifier |
-|--------------|---------------------|
-| C# code | `csharp` |
-| PowerShell | `powershell` |
-| Bash/Shell | `bash` |
-| JSON | `json` |
-| YAML | `yaml` |
-| Markdown | `markdown` |
-| Plain text | `text` |
-| Generic/pseudo | `text` |
+| Content Type   | Language Identifier |
+| -------------- | ------------------- |
+| C# code        | `csharp`            |
+| PowerShell     | `powershell`        |
+| Bash/Shell     | `bash`              |
+| JSON           | `json`              |
+| YAML           | `yaml`              |
+| Markdown       | `markdown`          |
+| Plain text     | `text`              |
+| Generic/pseudo | `text`              |
 
 ### Generic Type Escaping
 
 ```markdown
 # Wrong - triggers MD033
+
 Use ArrayPool<T> for buffer pooling.
 
 # Correct - escaped in backticks
+
 Use `ArrayPool<T>` for buffer pooling.
 ```
 

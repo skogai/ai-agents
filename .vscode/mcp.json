@@ -1,8 +1,18 @@
 {
   "servers": {
-    "serena": {
+    "deepwiki": {
+      "type": "http",
+      "url": "https://mcp.deepwiki.com/mcp"
+    },
+    "forgetful": {
+      "args": [
+        "forgetful-ai"
+      ],
       "command": "uvx",
-      "type": "stdio",
+      "disabled": false,
+      "type": "stdio"
+    },
+    "serena": {
       "args": [
         "--from",
         "git+https://github.com/oraios/serena",
@@ -14,18 +24,9 @@
         "ide",
         "--port",
         "24283"
-      ]
-    },
-    "deepwiki": {
-      "type": "http",
-      "url": "https://mcp.deepwiki.com/mcp"
-    },
-    "forgetful": {
-      "type": "stdio",
+      ],
       "command": "uvx",
-      "args": [
-        "forgetful-ai"
-      ]
+      "type": "stdio"
     }
   }
 }

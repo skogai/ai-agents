@@ -74,13 +74,13 @@ streaming support. Fragile.
 
 ## Decision Criteria
 
-| Criterion | Threshold | Evidence |
-|-----------|-----------|----------|
-| Rule understanding | Must articulate original rationale | Quote from ADR |
-| Alternatives exhausted | Minimum 2 alternatives tried | Failure evidence |
-| Scope limitation | Narrowest possible exception | Explicit boundary |
-| Reversibility | Path to undo exception | Documented plan |
-| Precedent control | No open-ended language | Explicit exclusions |
+| Criterion              | Threshold                          | Evidence            |
+| ---------------------- | ---------------------------------- | ------------------- |
+| Rule understanding     | Must articulate original rationale | Quote from ADR      |
+| Alternatives exhausted | Minimum 2 alternatives tried       | Failure evidence    |
+| Scope limitation       | Narrowest possible exception       | Explicit boundary   |
+| Reversibility          | Path to undo exception             | Documented plan     |
+| Precedent control      | No open-ended language             | Explicit exclusions |
 
 ## Exception Classification
 
@@ -126,10 +126,10 @@ Use this template when proposing ADR exceptions:
 
 ### Alternatives Attempted
 
-| Alternative | Attempt | Outcome | Evidence |
-|-------------|---------|---------|----------|
-| [Option 1] | [What tried] | [Failed/Partial] | [Link/commit] |
-| [Option 2] | [What tried] | [Failed/Partial] | [Link/commit] |
+| Alternative | Attempt      | Outcome          | Evidence      |
+| ----------- | ------------ | ---------------- | ------------- |
+| [Option 1]  | [What tried] | [Failed/Partial] | [Link/commit] |
+| [Option 2]  | [What tried] | [Failed/Partial] | [Link/commit] |
 
 ### Exception Details
 
@@ -164,13 +164,13 @@ Use this template when proposing ADR exceptions:
 
 ## Anti-Patterns
 
-| Anti-Pattern | Problem | Fix |
-|--------------|---------|-----|
-| **Vague scope** | "Python may be used when needed" | Define exact paths/conditions |
-| **Missing rationale** | "It's easier this way" | Document why the rule exists |
-| **Single alternative** | "PowerShell doesn't work" | Try at least two approaches |
-| **No reversibility** | Permanent exception by default | Define exit conditions |
-| **Expanding scope** | Exception creeps to new areas | Review and reauthorize |
+| Anti-Pattern           | Problem                          | Fix                           |
+| ---------------------- | -------------------------------- | ----------------------------- |
+| **Vague scope**        | "Python may be used when needed" | Define exact paths/conditions |
+| **Missing rationale**  | "It's easier this way"           | Document why the rule exists  |
+| **Single alternative** | "PowerShell doesn't work"        | Try at least two approaches   |
+| **No reversibility**   | Permanent exception by default   | Define exit conditions        |
+| **Expanding scope**    | Exception creeps to new areas    | Review and reauthorize        |
 
 ## Example: PR #908 Python Exception (Good)
 
