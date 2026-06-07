@@ -3,6 +3,11 @@
 
 Validates prerequisites, constructs act commands, and provides helpful error messages.
 
+Supports two runtimes interchangeably:
+- Standalone ``act`` binary on PATH.
+- GitHub CLI extension ``gh act`` (https://github.com/nektos/gh-act) when
+  standalone ``act`` is not installed but ``gh`` is.
+
 Supported workflows (no AI dependencies):
 - pester-tests.yml        : Run Pester unit tests
 - validate-paths.yml      : Validate path normalization
@@ -30,8 +35,146 @@ def _check_command_exists(command: str) -> str | None:
 
 
 def _get_repo_root() -> str:
-    """Get the repository root directory."""
+    """Get the current worktree root directory.
+
+    Uses git rev-parse --show-toplevel rather than counting parent
+    directories from __file__. Path-counting is fragile to script relocation
+    (it resolved under .claude/, not the repo root) and wrong in a LINKED
+    worktree, where the script may be vendored at a different depth (#2377).
+    --show-toplevel returns the current worktree root in every layout.
+    Canonical reference: scripts/github_core/repo.py::get_repo_root.
+
+    Falls back to the four-parents path when git cannot return a worktree root,
+    so workflow-path resolution below still has a best-effort anchor.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=_git_env(),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0 and result.stdout.strip():
+        return str(Path(result.stdout.strip()).resolve())
     return str(Path(__file__).resolve().parent.parent.parent.parent)
+
+
+def _git_env() -> dict[str, str]:
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"}
+    }
+
+
+def _read_worktree_gitdir(repo_root: str) -> str | None:
+    """Return the absolute GIT_DIR for a LINKED worktree, else None.
+
+    In a linked worktree, ``<repo_root>/.git`` is a FILE containing a single
+    line ``gitdir: <path>`` that points at the per-worktree admin directory
+    under the main checkout's ``.git/worktrees/<name>``. ``act`` / ``gh act``
+    run as a child process with ``cwd=repo_root`` and need ``GIT_DIR`` set to
+    that path because they cannot follow the file pointer themselves (#2344).
+
+    Returns the resolved absolute gitdir, or None when ``.git`` is a normal
+    directory (no override needed) or the pointer is unreadable.
+    """
+    git_path = Path(repo_root) / ".git"
+    if not git_path.is_file():
+        return None
+    try:
+        content = git_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    pointer = content.split(":", 1)[1].strip()
+    if not pointer:
+        return None
+    gitdir = Path(pointer)
+    if not gitdir.is_absolute():
+        gitdir = (Path(repo_root) / gitdir).resolve()
+    else:
+        gitdir = gitdir.resolve()
+    return str(gitdir)
+
+
+def _act_env(repo_root: str) -> dict[str, str]:
+    """Build the subprocess env for act, GIT_DIR-aware for linked worktrees."""
+    env = _git_env()
+    gitdir = _read_worktree_gitdir(repo_root)
+    if gitdir is not None:
+        env["GIT_DIR"] = gitdir
+    return env
+
+
+def _unsupported_worktree_gitdir_error(repo_root: str) -> str | None:
+    git_path = Path(repo_root) / ".git"
+    if not git_path.is_file():
+        return None
+    gitdir = _read_worktree_gitdir(repo_root)
+    if gitdir is None:
+        return f"unsupported linked git worktree marker at {git_path}"
+    if not Path(gitdir).is_dir():
+        return f"linked git worktree gitdir is missing: {gitdir}"
+    return None
+
+
+def _resolve_act_runner() -> tuple[list[str], str] | None:
+    """Resolve which act runtime is available.
+
+    Returns ``(argv_prefix, display_name)`` where ``argv_prefix`` is the
+    command list to invoke act (e.g. ``["act"]`` or ``["gh", "act"]``),
+    and ``display_name`` is the human-readable name for logs.
+
+    Returns ``None`` when no supported runtime is available.
+
+    Resolution order:
+        1. Standalone ``act`` on PATH.
+        2. ``gh`` on PATH with the ``act`` extension installed
+           (verified via ``gh act --version``).
+    """
+    if _check_command_exists("act"):
+        return (["act"], "act")
+
+    if _check_command_exists("gh"):
+        probe = subprocess.run(
+            ["gh", "act", "--version"],
+            capture_output=True, text=True, check=False,
+        )
+        if probe.returncode == 0:
+            return (["gh", "act"], "gh act")
+
+    return None
+
+
+def _redact_secret_arg(arg: str) -> str:
+    if "=" not in arg:
+        return "<redacted>"
+    key, _value = arg.split("=", 1)
+    return f"{key}=<redacted>"
+
+
+def _redact_act_args_for_log(args: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            redacted.append(_redact_secret_arg(arg))
+            redact_next = False
+            continue
+        if arg.startswith("-s=") or arg.startswith("--secret="):
+            option, value = arg.split("=", 1)
+            redacted.append(f"{option}={_redact_secret_arg(value)}")
+            continue
+        redacted.append(arg)
+        if arg in {"-s", "--secret"}:
+            redact_next = True
+    return redacted
 
 
 WORKFLOW_MAP = {
@@ -83,10 +226,13 @@ def main(argv: list[str] | None = None) -> int:
 
     print("[INFO] Checking prerequisites...")
 
-    # Check for act
-    act_path = _check_command_exists("act")
-    if not act_path:
-        print("[ERROR] act not found. Install act to enable local workflow testing.")
+    # Resolve an act runtime (standalone act, or gh act extension).
+    runner = _resolve_act_runner()
+    if runner is None:
+        print(
+            "[ERROR] act not found. Install act (standalone) or the gh act "
+            "extension to enable local workflow testing.",
+        )
         print()
         print("Installation instructions:")
         print("  macOS:       brew install act")
@@ -97,10 +243,11 @@ def main(argv: list[str] | None = None) -> int:
         print("See: https://nektosact.com/installation/index.html")
         return 2
 
+    act_argv, act_name = runner
     act_version = subprocess.run(
-        ["act", "--version"], capture_output=True, text=True, check=False,
+        [*act_argv, "--version"], capture_output=True, text=True, check=False,
     )
-    print(f"[SUCCESS] act found: {act_version.stdout.strip()}")
+    print(f"[SUCCESS] {act_name} found: {act_version.stdout.strip()}")
 
     # Check for Docker
     docker_path = _check_command_exists("docker")
@@ -122,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve workflow path
     repo_root = _get_repo_root()
+    worktree_error = _unsupported_worktree_gitdir_error(repo_root)
+    if worktree_error is not None:
+        print(f"[ERROR] {worktree_error}")
+        print("Re-run from the main worktree or repair the linked worktree metadata.")
+        return 2
     workflows_dir = os.path.join(repo_root, ".github", "workflows")
 
     workflow_path: str | None = None
@@ -192,12 +344,14 @@ def main(argv: list[str] | None = None) -> int:
                 print("[INFO] Using GITHUB_TOKEN from gh CLI")
 
     # Execute act
-    print(f"[INFO] Running: act {' '.join(act_args)}")
+    logged_args = " ".join(_redact_act_args_for_log(act_args))
+    print(f"[INFO] Running: {act_name} {logged_args}")
     print()
 
     result = subprocess.run(
-        ["act", *act_args],
+        [*act_argv, *act_args],
         cwd=repo_root,
+        env=_act_env(repo_root),
         check=False,
     )
 

@@ -40,7 +40,7 @@ jobs:
     outputs:
       python-changed: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.python }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Check for Python file changes
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
@@ -79,7 +79,7 @@ jobs:
           PYTHON_CHANGED: ${{ needs.check-paths.outputs.python-changed }}
         run: |
           if [ "$PYTHON_CHANGED" != "true" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "No Python files changed - skipping tests"
           fi
 
@@ -89,7 +89,7 @@ jobs:
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         if: steps.should-run.outputs.skip != 'true'
 
       - name: Setup code environment
@@ -100,15 +100,36 @@ jobs:
           enable-pester: false
           enable-git-hooks: false
 
+      # Issue #2194: ruff is configured in pyproject.toml ([tool.ruff]) but no CI
+      # workflow ran it. The repository has a pre-existing backlog of 2026 ruff
+      # findings (measured 2026-06-01 with ruff>=0.15.14), so this step is
+      # report-only (continue-on-error: true). It annotates the PR diff with
+      # findings via --output-format=github without blocking merges. Flip to a
+      # blocking gate (drop continue-on-error) once the backlog reaches zero.
+      # See pyproject.toml for the lint config; the invocation matches the
+      # baseline command `ruff check .`. ruff is installed via the
+      # setup-code-env action (uv pip install --system -e ".[dev]").
+      - name: Run ruff (report-only)
+        if: steps.should-run.outputs.skip != 'true'
+        continue-on-error: true
+        run: ruff check . --output-format=github
+
       - name: Run pytest
         if: steps.should-run.outputs.skip != 'true'
         run: |
           mkdir -p artifacts
           pytest --cov --cov-report=xml:artifacts/coverage.xml --junitxml=artifacts/pytest-results.xml
 
-      - name: Pin ai_review_common.verdict coverage at 98% (REQ-008-07)
+      # Issue #1963: test_ai_review.py was split by tested module into
+      # test_verdict.py (get_verdict, merge_verdicts, extract_verdict, verdict
+      # presentation helpers) and test_quality_gate.py (get_failure_category,
+      # spec_validation_failed). scripts.ai_review_common.verdict hosts all of
+      # those plus the label/milestone helpers that remain in test_ai_review.py,
+      # so the 100% gate must run all three files. Running test_ai_review.py
+      # alone now reports 63% and trips --cov-fail-under=100.
+      - name: Pin ai_review_common.verdict coverage at 100% (REQ-008-07)
         if: steps.should-run.outputs.skip != 'true'
-        run: pytest tests/test_ai_review.py --cov=scripts.ai_review_common.verdict --cov-branch --cov-fail-under=98
+        run: pytest tests/test_ai_review.py tests/test_verdict.py tests/test_quality_gate.py --cov=scripts.ai_review_common.verdict --cov-branch --cov-fail-under=100
 
       # Issue #2063 (revised): module-name form is the canonical form for this
       # repository. The file-path form (--cov=.claude/skills/.../*.py) was
@@ -149,7 +170,7 @@ jobs:
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Setup code environment
         uses: ./.github/actions/setup-code-env
@@ -160,18 +181,20 @@ jobs:
 
       - name: Run pip-audit
         run: |
+          # Keep the audited environment on the first fixed pip release for
+          # PYSEC-2026-196. CI hit pip 26.1.1 after setup-code-env installed
+          # dependencies, and pip-audit reports the fixed version as 26.1.2.
+
           # Ignored CVEs (re-evaluate when upstream releases a fix):
           #   CVE-2026-4539: pygments 2.19.2, no fix available.
-          #   CVE-2026-3219: pip 26.0/26.0.1 mishandles concatenated tar/ZIP
-          #     archives (CWE-434, CVSS 4.6, local + user interaction).
-          #     Fix is merged on pip main (PR pypa/pip#13870), pending pip 26.1
-          #     release. CI installs trusted deps from PyPI via uv lockfile, so
-          #     the local-only attack surface does not apply. Remove this ignore
-          #     once pip 26.1 ships.
-          #   CVE-2026-6357: pip 26.0.x, fix in pip 26.1 (same class as
-          #     CVE-2026-3219 above: local-only attack surface that does not
-          #     apply to CI's uv-lockfile install path). Drop this ignore in
-          #     the same upgrade as CVE-2026-3219.
+          #   CVE-2026-3219: historical pip 26.0/26.0.1 finding for
+          #     concatenated tar/ZIP archives. The runner is upgraded to pip
+          #     26.1.2 below; keep this ignore only while pip-audit still
+          #     reports stale transitive runner metadata after that upgrade.
+          #   CVE-2026-6357: historical pip 26.0.x finding in the same
+          #     local-only class as CVE-2026-3219. Remove this ignore when
+          #     pip-audit no longer reports it after the pip 26.1.2 upgrade.
+          python -m pip install --upgrade "pip==26.1.2"
           pip-audit \
             --ignore-vuln CVE-2026-4539 \
             --ignore-vuln CVE-2026-3219 \
@@ -213,3 +236,40 @@ jobs:
           echo ""
           echo "See the 'python' filter in check-paths job for paths that trigger tests."
           echo "Reference: .github/workflows/pytest.yml"
+
+  # ─── Windows pwsh contract test (fix #2231 item 1) ─────────────────────────
+  # The PowerShell path-resolution contract test is guarded by
+  # `skipif(shutil.which("pwsh") is None)`, so it never runs on Linux ubuntu
+  # runners. Windows is where #2205 was first reported. This job ensures the
+  # pwsh branch of test_generate_hooks_runtime_contract.py runs on an always-on
+  # Windows runner. No auth or external credentials needed: the test is purely
+  # path-resolution (generates hooks into a tmp dir and verifies resolution).
+  test-windows-pwsh:
+    name: Run Python Tests (Windows - pwsh contract)
+    needs: check-paths
+    if: needs.check-paths.outputs.python-changed == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Run pwsh hook contract tests
+        shell: pwsh
+        run: uv run pytest tests/build_scripts/test_generate_hooks_runtime_contract.py -v -k "powershell"

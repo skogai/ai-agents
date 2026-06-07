@@ -88,10 +88,19 @@ record_skip() {
 
 # Temp file cleanup on exit (handles Ctrl+C, early exit, normal exit)
 TEMP_FILES=()
+# Auto-retro suppression sentinel (Issue #2327). Set once REPO_ROOT is known.
+# The Stop hook (.claude/hooks/Stop/invoke_auto_retrospective.py) skips skeleton
+# generation while this file exists, so a session ending mid-pre-push (including
+# a failing one) does not leave an untracked auto-retro file or a
+# docs/retros/INDEX.md edit behind. Removed on exit by cleanup().
+AUTO_RETRO_SUPPRESS_SENTINEL=""
 cleanup() {
     for f in "${TEMP_FILES[@]}"; do
         rm -f "$f"
     done
+    if [ -n "$AUTO_RETRO_SUPPRESS_SENTINEL" ]; then
+        rm -f "$AUTO_RETRO_SUPPRESS_SENTINEL"
+    fi
 }
 trap cleanup EXIT
 
@@ -106,12 +115,53 @@ if [ ! -d "$REPO_ROOT" ]; then
 fi
 cd "$REPO_ROOT"
 
+# Drop the auto-retro suppression sentinel for the duration of this run
+# (Issue #2327). .agents/.hook-state/ is gitignored, so the sentinel never
+# dirties the tree. Best-effort: a write failure must not block the push.
+if [ -d "$REPO_ROOT/.agents" ]; then
+    if mkdir -p "$REPO_ROOT/.agents/.hook-state" 2>/dev/null; then
+        AUTO_RETRO_SUPPRESS_SENTINEL="$REPO_ROOT/.agents/.hook-state/auto-retrospective.suppress"
+        : > "$AUTO_RETRO_SUPPRESS_SENTINEL" 2>/dev/null || AUTO_RETRO_SUPPRESS_SENTINEL=""
+    fi
+fi
+
 # Python detection (shared pattern with pre-commit)
+PYTHON_ENV_FAILURE_RECORDED=0
+
+record_python_env_failure() {
+    if [ "$PYTHON_ENV_FAILURE_RECORDED" -eq 0 ]; then
+        record_fail "$1"
+        echo_info "  $2"
+        PYTHON_ENV_FAILURE_RECORDED=1
+    fi
+}
+
 set_python_cmd() {
-    # Try uv run python first (handles virtual environments and project dependencies)
+    # Try uv run python first (handles virtual environments and project dependencies).
+    # --frozen pins the lockfile: uv uses uv.lock as-is and never re-resolves or
+    # rewrites it during a pre-push run. Without --frozen, `uv run` can silently
+    # re-resolve dependencies and rewrite uv.lock, leaving the worktree dirty
+    # after validation (Issue #2327). --frozen errors loudly on a stale lock
+    # instead, so drift surfaces rather than dirtying the tree.
+    if [ -f "$REPO_ROOT/uv.lock" ] || [ -f "$REPO_ROOT/pyproject.toml" ]; then
+        if ! command -v uv &> /dev/null; then
+            record_python_env_failure \
+                "Python environment: uv is required for this checkout" \
+                "Install uv so pre-push can run validators from uv.lock instead of system Python."
+            return 1
+        fi
+        if uv run --frozen python -c 'import sys' &> /dev/null; then
+            PYTHON_CMD=(uv run --frozen python)
+            return 0
+        fi
+        record_python_env_failure \
+            "Python environment: uv run --frozen python failed" \
+            "Refusing system Python fallback in a uv-managed checkout; fix uv.lock or pyproject.toml."
+        return 1
+    fi
     if command -v uv &> /dev/null; then
-        if uv run python -c 'import sys' &> /dev/null; then
-            PYTHON_CMD=(uv run python)
+        if uv run --frozen python -c 'import sys' &> /dev/null; then
+            PYTHON_CMD=(uv run --frozen python)
             return 0
         fi
     fi
@@ -142,6 +192,7 @@ set_python_cmd() {
 ZERO="0000000000000000000000000000000000000000"
 CHANGED_FILES=""
 PUSH_RANGE=""
+PUSH_BRANCH=""
 REFS_PROCESSED=0
 # Store each ref's base and head for per-ref validation (plugin version bump)
 PVB_BASES=()
@@ -182,8 +233,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         fi
     fi
 
-    # Keep last ref range for commit count and additions checks
+    # Keep last ref range and branch for commit count and additions checks
     PUSH_RANGE="$ref_range"
+    case "$local_ref" in
+        refs/heads/*)
+            PUSH_BRANCH="${local_ref#refs/heads/}"
+            ;;
+    esac
 
     # Store base and head for per-ref plugin version validation
     if [ -n "$ref_range" ]; then
@@ -258,6 +314,13 @@ CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -E '^templates/' || true)
 CHANGED_SESSIONS=$(echo "$CHANGED_FILES" | grep -E '^\.agents/sessions/' || true)
 CHANGED_PLANNING=$(echo "$CHANGED_FILES" | grep -E '^\.agents/planning/' || true)
 CHANGED_ADRS=$(echo "$CHANGED_FILES" | grep -E '^\.agents/architecture/ADR-.*\.md$' || true)
+# Agent drift compares agent prompt copies only. Copilot skill scripts live under
+# src/copilot-cli/skills/ and must not inherit unrelated agent drift blockers.
+CHANGED_AGENT_DRIFT_INPUTS=$(echo "$CHANGED_FILES" | grep -E '^(src/claude/[^/]+\.md|src/vs-code-agents/.*\.agent\.md|src/copilot-cli/agents/.*\.agent\.md|templates/agents/|\.claude/agents/|\.github/agents/)' || true)
+# Hook-anchoring relevant paths (#2205): generator, both plugin hook files,
+# the project-mode settings source, the anchoring gate, and the e2e itself.
+# A change to any forces the real-CLI e2e (resolution under the live contract).
+CHANGED_HOOKS=$(echo "$CHANGED_FILES" | grep -E '^(build/scripts/generate_hooks\.py|src/copilot-cli/hooks/|\.claude/hooks/|\.claude/settings\.json|scripts/validation/validate_hook_anchoring\.py|tests/e2e/test_cli_hook_e2e\.py)' || true)
 
 # ============================================================================
 # Phase 1: Fast Guards (< 5s)
@@ -276,6 +339,33 @@ if [ "$current_branch" = "main" ] || [ "$current_branch" = "master" ]; then
 fi
 
 record_pass "Branch guard ($current_branch)"
+
+# 1b. Placeholder identity guard (issue #2466)
+# Rejects commits whose author/committer is Test <test@test.com>.
+# That identity leaks from pytest fixtures writing git config with wrong cwd.
+if [ -n "$PUSH_RANGE" ]; then
+    if set_python_cmd; then
+        PLACEHOLDER_GUARD_SCRIPT="$REPO_ROOT/scripts/validation/check_placeholder_identity.py"
+        if [ -f "$PLACEHOLDER_GUARD_SCRIPT" ]; then
+            if ! "${PYTHON_CMD[@]}" "$PLACEHOLDER_GUARD_SCRIPT" \
+                    --push-range "$PUSH_RANGE" \
+                    --repo-root "$REPO_ROOT"; then
+                record_fail "Placeholder identity check: placeholder identity detected in push range"
+                echo_info "  See stderr above for offending commits."
+                echo_info "  Fix: ensure pytest fixtures don't modify git config outside tmp_path."
+                echo_info "  Ref: issue #2466, scripts/github_core/placeholder_identity.py"
+            else
+                record_pass "Placeholder identity check (no placeholder identities in range)"
+            fi
+        else
+            record_skip "Placeholder identity check (script not found: $PLACEHOLDER_GUARD_SCRIPT)"
+        fi
+    else
+        record_skip "Placeholder identity check (Python not available)"
+    fi
+else
+    record_skip "Placeholder identity check (no push range)"
+fi
 
 # Detect merge commits from main in the push range. Merges from upstream
 # naturally inflate commit/file counts with already-reviewed changes, so
@@ -307,9 +397,28 @@ fi
 if [ -n "$PUSH_RANGE" ]; then
     COMMIT_COUNT=$(git rev-list --count "$PUSH_RANGE" 2>/dev/null || echo "0")
     if [ "$COMMIT_COUNT" -gt "$COMMIT_LIMIT" ]; then
-        record_fail "Commit count ($COMMIT_COUNT) exceeds limit of $COMMIT_LIMIT"
-        echo_info "  Consider squashing commits or splitting the PR."
-        echo_info "  See: CONTRIBUTING.md#commit-count-thresholds"
+        # Honor the commit-limit-bypass label so a repair push to an
+        # already-over-limit PR does not require --no-verify (Issue #2456).
+        # Mirrors the CI gate in .github/workflows/pr-validation.yml
+        # ("Enforce Blocking Issues"). The helper fails closed: any gh error
+        # leaves the limit enforced.
+        if set_python_cmd; then
+            BYPASS_STATUS=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+                "${PYTHON_CMD[@]}" "$REPO_ROOT/scripts/validation/check_pr_bypass_label.py" \
+                --branch "${PUSH_BRANCH:-$current_branch}" 2>/dev/null)
+            BYPASS_EXIT=$?
+        else
+            BYPASS_STATUS="python unavailable; cannot check bypass label"
+            BYPASS_EXIT=3
+        fi
+        if [ "$BYPASS_EXIT" -eq 0 ]; then
+            record_warn "Commit count ($COMMIT_COUNT > $COMMIT_LIMIT) bypassed: $BYPASS_STATUS"
+        else
+            record_fail "Commit count ($COMMIT_COUNT) exceeds limit of $COMMIT_LIMIT ($BYPASS_STATUS)"
+            echo_info "  Consider squashing commits or splitting the PR."
+            echo_info "  Or add the 'commit-limit-bypass' label to the PR for repair pushes."
+            echo_info "  See: CONTRIBUTING.md#commit-count-thresholds"
+        fi
     elif [ "$COMMIT_COUNT" -gt "$COMMIT_WARN" ]; then
         record_warn "Commit count ($COMMIT_COUNT) approaching limit of $COMMIT_LIMIT"
     else
@@ -358,6 +467,53 @@ else
     record_skip "Total additions (no push range)"
 fi
 
+# 4b. Review marker freshness (Issue #1938 / AC6)
+# /ship enforces marker presence. Pre-push fails closed only when a marker is
+# present but stale, malformed, or unverifiable, so ordinary pre-review pushes
+# still work while marker-bearing release pushes cannot carry a bad trailer.
+REVIEW_MARKER_SCRIPT="$REPO_ROOT/.claude/skills/review/scripts/validate_review_marker.py"
+REVIEW_MARKER_FOUND=0
+REVIEW_MARKER_READY=0
+for pushed_sha in "${PVB_HEADS[@]}"; do
+    REVIEW_MARKER_VALUES=$(git log -1 --format='%(trailers:key=Reviewed-By,valueonly,unfold)' "$pushed_sha" 2>/dev/null)
+    REVIEW_MARKER_READ_RC=$?
+    if [ $REVIEW_MARKER_READ_RC -ne 0 ]; then
+        record_fail "Review marker validation could not inspect pushed ref ${pushed_sha:0:12}"
+        continue
+    fi
+    if ! printf '%s\n' "$REVIEW_MARKER_VALUES" | grep -q '^/review@'; then
+        continue
+    fi
+
+    REVIEW_MARKER_FOUND=1
+    if [ -L "$REVIEW_MARKER_SCRIPT" ]; then
+        record_fail "Review marker validator is a symlink; refusing to trust it"
+    elif [ ! -f "$REVIEW_MARKER_SCRIPT" ]; then
+        record_fail "Review marker validator missing at $REVIEW_MARKER_SCRIPT"
+    elif ! set_python_cmd; then
+        record_fail "Review marker validation requires Python"
+    else
+        REVIEW_MARKER_READY=1
+        REVIEW_MARKER_OUTPUT=$(mktemp)
+        TEMP_FILES+=("$REVIEW_MARKER_OUTPUT")
+        "${PYTHON_CMD[@]}" "$REVIEW_MARKER_SCRIPT" --ref "$pushed_sha" --repo-root "$REPO_ROOT" > "$REVIEW_MARKER_OUTPUT" 2>&1
+        REVIEW_MARKER_RC=$?
+        if [ $REVIEW_MARKER_RC -eq 0 ]; then
+            record_pass "Review marker validation (${pushed_sha:0:12})"
+        else
+            cat "$REVIEW_MARKER_OUTPUT"
+            record_fail "Review marker validation failed for ${pushed_sha:0:12} (exit $REVIEW_MARKER_RC)"
+            echo_info "  Fix: re-run /review so the pushed tip is an empty marker commit binding its parent."
+        fi
+        rm -f "$REVIEW_MARKER_OUTPUT"
+    fi
+done
+if [ $REVIEW_MARKER_FOUND -eq 0 ]; then
+    record_skip "Review marker validation (no marker on pushed refs; /ship enforces presence)"
+elif [ $REVIEW_MARKER_READY -eq 0 ]; then
+    echo_info "  Fix: restore $REVIEW_MARKER_SCRIPT and Python before pushing marker commits."
+fi
+
 # ============================================================================
 # Phase 2: Linting & Type Checks (< 30s)
 # ============================================================================
@@ -388,7 +544,16 @@ if [ -n "$CHANGED_MD" ]; then
                 record_pass "Markdown lint (${#MD_FILES[@]} files)"
             else
                 echo_info "  Markdown issues found:"
-                grep -E '^[^/].*:.*MD[0-9]+' "$LINT_OUTPUT" 2>/dev/null | head -10 || head -10 "$LINT_OUTPUT"
+                # Without `set -o pipefail`, a `grep ... | head || head`
+                # pipeline takes its exit status from the final `head`, which
+                # returns 0 even when grep matched nothing, so the `||`
+                # fallback never fired (issue #1924). Test grep explicitly and
+                # branch.
+                if grep -qE '^[^/].*:.*MD[0-9]+' "$LINT_OUTPUT" 2>/dev/null; then
+                    grep -E '^[^/].*:.*MD[0-9]+' "$LINT_OUTPUT" 2>/dev/null | head -10
+                else
+                    head -10 "$LINT_OUTPUT"
+                fi
                 rm -f "$LINT_OUTPUT"
                 record_fail "Markdown lint"
                 echo_info "  Fix: npx markdownlint-cli2 --fix <files>"
@@ -615,63 +780,67 @@ fi
 echo_phase "Phase 3: Build Validation"
 
 # 10. Agent generation drift
-GENERATE_AGENTS_SCRIPT="$REPO_ROOT/build/Generate-Agents.ps1"
+#
+# Issue #2343: this check used to invoke build/Generate-Agents.ps1 -Validate,
+# but ADR-042 (commit 7b8347da) expunged that PowerShell script in favor of
+# build/generate_agents.py. The Python port is now invoked transitively by
+# build_all.py --check (Section 11b) via build_all._build_agents, which is
+# the authoritative source of truth per the issue. Section 11b covers agent
+# template-vs-generated drift end-to-end, so a separate Section 10 here
+# would either re-do the same work or, worse (as observed pre-fix), print
+# "SKIP: Agent generation (script not found)" because the .ps1 file is
+# gone -- contradicting a green build_all.py --check. The check stays
+# deleted intentionally; do not re-add a standalone agent-generation gate
+# without first reconciling it against build_all.py --check.
 
-if [ -n "$CHANGED_TEMPLATES" ] || [ -n "$(echo "$CHANGED_FILES" | grep -E '^src/(copilot-cli|vs-code-agents)/' || true)" ]; then
-    if [ -L "$GENERATE_AGENTS_SCRIPT" ]; then
-        record_warn "Agent generation script is a symlink (skipping)"
-    elif [ -f "$GENERATE_AGENTS_SCRIPT" ]; then
-        if command -v pwsh &> /dev/null; then
-            GEN_OUTPUT=$(mktemp)
-            TEMP_FILES+=("$GEN_OUTPUT")
-            if pwsh -NoProfile -ExecutionPolicy Bypass -File "$GENERATE_AGENTS_SCRIPT" -Validate > "$GEN_OUTPUT" 2>&1; then
-                record_pass "Agent generation (templates match generated)"
-            else
-                echo_info "  Agent generation output:"
-                head -20 "$GEN_OUTPUT"
-                record_fail "Agent generation drift detected"
-                echo_info "  Fix: pwsh build/Generate-Agents.ps1"
-                echo_info "  Then commit the regenerated files."
-            fi
-            rm -f "$GEN_OUTPUT"
-        else
-            record_skip "Agent generation (pwsh not available)"
-        fi
-    else
-        record_skip "Agent generation (script not found)"
-    fi
-else
-    record_skip "Agent generation (no template/agent files changed)"
-fi
+# 11. Agent drift detection (Python port of the retired Detect-AgentDrift.ps1)
+AGENT_DRIFT_SCRIPT="$REPO_ROOT/build/scripts/detect_agent_drift.py"
 
-# 11. Agent drift detection
-AGENT_DRIFT_SCRIPT="$REPO_ROOT/build/scripts/Detect-AgentDrift.ps1"
-
-if [ -n "$(echo "$CHANGED_FILES" | grep -E '^(src/|templates/)' || true)" ]; then
+if [ -n "$CHANGED_AGENT_DRIFT_INPUTS" ]; then
     if [ -L "$AGENT_DRIFT_SCRIPT" ]; then
-        record_warn "Agent drift script is a symlink (skipping)"
+        record_warn "Agent drift script is a symlink (skipping $AGENT_DRIFT_SCRIPT)"
     elif [ -f "$AGENT_DRIFT_SCRIPT" ]; then
-        if command -v pwsh &> /dev/null; then
+        if set_python_cmd; then
             DRIFT_OUTPUT=$(mktemp)
             TEMP_FILES+=("$DRIFT_OUTPUT")
-            if pwsh -NoProfile -ExecutionPolicy Bypass -File "$AGENT_DRIFT_SCRIPT" > "$DRIFT_OUTPUT" 2>&1; then
-                record_pass "Agent drift detection"
+
+            # Issue #2423: scope drift to the agent families this push actually
+            # touches. CHANGED_FILES is computed from the push range above
+            # (per-ref `git diff --name-only` against the merge-base with
+            # origin/main); we reuse it instead of re-diffing because a
+            # force-push leaves the remote sha behind and re-diff misclassifies
+            # files. detect_agent_drift.py maps each path back to its agent
+            # family and only compares those families, so pre-existing drift in
+            # unrelated agents no longer blocks a scoped push. If
+            # CHANGED_FILES is empty (tag push or branch deletion), the outer
+            # `if -n` above already skipped this section; we never reach here
+            # with no paths to pass.
+            DRIFT_ARGS=()
+            while IFS= read -r changed_file; do
+                [ -z "$changed_file" ] && continue
+                DRIFT_ARGS+=("--changed" "$changed_file")
+            done <<< "$CHANGED_FILES"
+
+            if "${PYTHON_CMD[@]}" "$AGENT_DRIFT_SCRIPT" "${DRIFT_ARGS[@]}" > "$DRIFT_OUTPUT" 2>&1; then
+                record_pass "Agent drift detection (scoped to ${#DRIFT_ARGS[@]} changed-file paths)"
             else
+                DRIFT_RC=$?
                 echo_info "  Agent drift output:"
                 head -20 "$DRIFT_OUTPUT"
-                record_fail "Agent drift detected"
+                record_fail "Agent drift detected (exit $DRIFT_RC; script=$AGENT_DRIFT_SCRIPT)"
                 echo_info "  Fix: Sync agent content across platforms."
-                echo_info "  Run: pwsh build/scripts/Detect-AgentDrift.ps1 -Verbose"
+                echo_info "  Run: ${PYTHON_CMD[*]} build/scripts/detect_agent_drift.py --all"
             fi
             rm -f "$DRIFT_OUTPUT"
         else
-            record_skip "Agent drift detection (pwsh not available)"
+            record_skip "Agent drift detection (no Python available; non-blocking)"
         fi
     else
-        record_skip "Agent drift detection (script not found)"
+        # Name the exact path so agents don't chase a phantom dependency.
+        record_skip "Agent drift detection (script not found at $AGENT_DRIFT_SCRIPT; non-blocking, build_all.py --check is authoritative)"
     fi
 else
-    record_skip "Agent drift detection (no src/template files changed)"
+    record_skip "Agent drift detection (no agent source/template files changed)"
 fi
 
 # 11b. Build pipeline staleness (build_all.py --check)
@@ -757,6 +926,30 @@ if [ -L "$PLUGIN_VERSION_SCRIPT" ]; then
     record_warn "Plugin version bump script is a symlink (skipping)"
 elif [ -f "$PLUGIN_VERSION_SCRIPT" ] && [ ${#PVB_BASES[@]} -gt 0 ]; then
     if set_python_cmd; then
+        # Issue #2453: refresh origin/<branch> bases before validating so a stale
+        # local ref does not false-PASS a bump that is actually insufficient
+        # against the real remote. Best-effort; failure does not block.
+        PVB_FETCHED=()
+        for pvb_base in "${PVB_BASES[@]}"; do
+            case "$pvb_base" in
+                origin/*)
+                    branch="${pvb_base#origin/}"
+                    case "$branch" in ""|*/*) continue;; esac
+                    already_fetched=0
+                    for f in "${PVB_FETCHED[@]}"; do
+                        if [ "$f" = "$branch" ]; then already_fetched=1; break; fi
+                    done
+                    if [ $already_fetched -eq 0 ]; then
+                        if ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+                            LC_ALL=C git fetch --no-tags --quiet origin "$branch" 2>/dev/null; then
+                            echo_info "  [WARN] could not refresh origin/$branch; continuing with stale local ref (#2453)"
+                        fi
+                        PVB_FETCHED+=("$branch")
+                    fi
+                    ;;
+            esac
+        done
+
         PVB_ALL_PASSED=1
         PVB_ANY_CONFIG_ERROR=0
         for i in "${!PVB_BASES[@]}"; do
@@ -848,12 +1041,25 @@ fi
     #     simulate a consumer repo via cwd=tmp_path, the inherited value
     #     overrides the simulation and is_project_repo() returns True, so the
     #     hook never prints [SKIP] and tests/test_hook_plugin_guards.py fails.
-    # CI runners do not export these variables, so behavior there is unchanged.
+    # Git also exports repository-local env vars into hooks (GIT_DIR,
+    # GIT_WORK_TREE, etc.). Tests that create temp repositories must not inherit
+    # the caller repo's env, or their git commands mutate this checkout instead
+    # of the temp repo. CI runners do not export these variables, so behavior
+    # there is unchanged.
     if [ -n "$CHANGED_PY_CANONICAL" ]; then
         if set_python_cmd; then
             if [ -d "$REPO_ROOT/tests" ]; then
                 TEST_OUTPUT=$(mktemp)
-                if env -u CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT="$REPO_ROOT/src/copilot-cli" "${PYTHON_CMD[@]}" -m pytest "$REPO_ROOT/tests/" \
+                if env \
+                    -u CLAUDE_PROJECT_DIR \
+                    -u GIT_DIR \
+                    -u GIT_WORK_TREE \
+                    -u GIT_INDEX_FILE \
+                    -u GIT_COMMON_DIR \
+                    -u GIT_OBJECT_DIRECTORY \
+                    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+                    CLAUDE_PLUGIN_ROOT="$REPO_ROOT/src/copilot-cli" \
+                    "${PYTHON_CMD[@]}" -m pytest "$REPO_ROOT/tests/" \
                     --ignore="$REPO_ROOT/.claude/lib/ai_review_common" \
                     --ignore="$REPO_ROOT/.claude/lib/hook_utilities" \
                     --ignore="$REPO_ROOT/.claude/lib/github_core" \
@@ -878,6 +1084,41 @@ fi
         fi
     else
         record_skip "Python tests (no .py files changed)"
+    fi
+
+    # 14b. Hook anchoring e2e (real CLIs) - FORCED when hook paths change (#2205).
+    # Installs the probe plugin into the real Copilot/Claude CLI and asserts the
+    # hook resolves from the install dir. Cannot be skipped locally while a CLI
+    # is present (RUN_CLI_E2E is set here, not left to the developer). Strips the
+    # inherited plugin-root env so each CLI sets its own. The tests self-skip
+    # per-CLI when a binary is absent, so contributors without the CLIs are not
+    # blocked. Real model calls cost credits; this runs only on hook changes.
+    # Set SKIP_CLI_E2E=true to opt out when a CLI is installed but unusable
+    # (unauthenticated or out of credits), mirroring SKIP_WORKFLOW_LOCAL_TEST.
+    if [ -n "$CHANGED_HOOKS" ]; then
+        if [ "${SKIP_CLI_E2E:-}" = "true" ]; then
+            record_skip "Hook anchoring e2e (SKIP_CLI_E2E=true)"
+        elif command -v copilot >/dev/null 2>&1 || command -v claude >/dev/null 2>&1; then
+            if set_python_cmd; then
+                E2E_OUTPUT=$(mktemp)
+                if env -u CLAUDE_PROJECT_DIR -u CLAUDE_PLUGIN_ROOT RUN_CLI_E2E=1 \
+                    "${PYTHON_CMD[@]}" -m pytest \
+                    "$REPO_ROOT/tests/e2e/test_cli_hook_e2e.py" -v > "$E2E_OUTPUT" 2>&1; then
+                    rm -f "$E2E_OUTPUT"
+                    record_pass "Hook anchoring e2e (real CLIs)"
+                else
+                    echo_info "  E2E output (last 40 lines):"
+                    tail -40 "$E2E_OUTPUT"
+                    rm -f "$E2E_OUTPUT"
+                    record_fail "Hook anchoring e2e failed (Copilot/Claude)"
+                    echo_info "  A hook script did not resolve from the plugin install dir."
+                fi
+            else
+                record_skip "Hook anchoring e2e (Python 3 not available)"
+            fi
+        else
+            record_skip "Hook anchoring e2e (no copilot/claude CLI on PATH)"
+        fi
     fi
 
 # ============================================================================

@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      should-validate: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.determine.outputs.should-validate }}
+      should-run-drift: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.determine.outputs.should-run-drift }}
       bypass-requested: ${{ steps.bypass.outputs.bypass-requested }}
 
     steps:
@@ -82,19 +82,28 @@ jobs:
               - 'src/vs-code-agents/**'
               - 'src/copilot-cli/**'
               - 'build/generate_agents.py'
+              - 'build/scripts/build_all.py'
+              - 'build/scripts/check_plugin_manifest_parity.py'
+              - 'scripts/sync_plugin_lib.py'
+              - 'scripts/ai_review_common/**'
+              - 'scripts/github_core/**'
+              - 'scripts/hook_utilities/**'
+              - '.claude/lib/**'
+              - '.claude/.claude-plugin/plugin.json'
+              - 'src/copilot-cli/.claude-plugin/plugin.json'
               - '.github/workflows/agent-drift-detection.yml'
 
       - name: Determine if validation should run
         id: determine
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should-validate=true" >> "$GITHUB_OUTPUT"
+            echo "should-run-drift=true" >> "$GITHUB_OUTPUT"
             echo "Decision: Run validation (manual trigger)"
           elif [ "${{ steps.filter.outputs.agents }}" = "true" ]; then
-            echo "should-validate=true" >> "$GITHUB_OUTPUT"
+            echo "should-run-drift=true" >> "$GITHUB_OUTPUT"
             echo "Decision: Run validation (agent files changed)"
           else
-            echo "should-validate=false" >> "$GITHUB_OUTPUT"
+            echo "should-run-drift=false" >> "$GITHUB_OUTPUT"
             echo "Decision: Skip validation (no agent files changed)"
           fi
 
@@ -105,7 +114,7 @@ jobs:
     needs: check-paths
     # Run when validation is needed AND no bypass was requested
     if: |
-      needs.check-paths.outputs.should-validate == 'true' &&
+      needs.check-paths.outputs.should-run-drift == 'true' &&
       needs.check-paths.outputs.bypass-requested != 'true'
     permissions:
       contents: read
@@ -114,8 +123,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
 
+      - name: Setup code environment
+        uses: ./.github/actions/setup-code-env
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          enable-pester: false
+          enable-git-hooks: false
+
       - name: Regenerate and validate agent files
         id: validate
+        continue-on-error: true
         shell: bash
         run: |
           echo "Running agent generation in validation mode..."
@@ -125,22 +142,62 @@ jobs:
 
           python3 build/generate_agents.py --validate
 
-      - name: Show diff on failure
-        if: failure() && steps.validate.conclusion == 'failure'
+      - name: Check plugin lib mirrors are in sync
+        id: lib-mirror
+        continue-on-error: true
         shell: bash
+        run: |
+          mirror_rc=0
+          build_rc=0
+          echo "Checking scripts/ -> .claude/lib/ sync via sync_plugin_lib.py --check"
+          python3 scripts/sync_plugin_lib.py --check || mirror_rc=$?
+          echo ""
+          echo "Checking .claude/lib/ -> src/copilot-cli/lib/ sync via build_all.py --check"
+          python3 build/scripts/build_all.py --check || build_rc=$?
+          if [ "$mirror_rc" -ne 0 ]; then
+            exit "$mirror_rc"
+          fi
+          exit "$build_rc"
+
+      - name: Check plugin manifest version parity
+        id: manifest-parity
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "Checking .claude/.claude-plugin/plugin.json and src/copilot-cli/.claude-plugin/plugin.json carry identical versions"
+          python3 build/scripts/check_plugin_manifest_parity.py
+
+      - name: Show diff on failure
+        if: >
+          always() &&
+          (steps.validate.outcome == 'failure' ||
+           steps.lib-mirror.outcome == 'failure' ||
+           steps.manifest-parity.outcome == 'failure')
+        shell: bash
+        env:
+          VALIDATE_CONCLUSION: ${{ steps.validate.outcome }}
+          LIB_MIRROR_CONCLUSION: ${{ steps.lib-mirror.outcome }}
+          MANIFEST_PARITY_CONCLUSION: ${{ steps.manifest-parity.outcome }}
         run: |
           echo ""
           echo "==========================================================="
           echo "  AGENT DRIFT DETECTED"
           echo "==========================================================="
           echo ""
-          echo "Generated agent files do not match the committed files."
-          echo "This means someone edited a generated file directly, bypassing"
-          echo "the source template."
+          echo "Generated agent files or plugin mirrors do not match committed files."
+          echo "Validation conclusions:"
+          echo "  generate_agents: $VALIDATE_CONCLUSION"
+          echo "  lib mirrors: $LIB_MIRROR_CONCLUSION"
+          echo "  manifest parity: $MANIFEST_PARITY_CONCLUSION"
           echo ""
 
-          # Regenerate without validation mode to get the expected content in working tree
-          python3 build/generate_agents.py
+          if [ "$VALIDATE_CONCLUSION" = "failure" ]; then
+            python3 build/generate_agents.py
+          fi
+          if [ "$LIB_MIRROR_CONCLUSION" = "failure" ]; then
+            python3 scripts/sync_plugin_lib.py || true
+            python3 build/scripts/build_all.py || true
+          fi
 
           # Show which files drifted
           changed_files=$(git diff --name-only)
@@ -176,13 +233,28 @@ jobs:
             git diff
           fi
 
+      - name: Fail when any drift check fails
+        if: >
+          always() &&
+          (steps.validate.outcome == 'failure' ||
+           steps.lib-mirror.outcome == 'failure' ||
+           steps.manifest-parity.outcome == 'failure')
+        shell: bash
+        run: |
+          echo "One or more drift checks failed. See the diff output above."
+          exit 1
+
       - name: Write job summary
         if: always()
         shell: bash
         env:
-          VALIDATE_CONCLUSION: ${{ steps.validate.conclusion }}
+          VALIDATE_CONCLUSION: ${{ steps.validate.outcome }}
+          LIB_MIRROR_CONCLUSION: ${{ steps.lib-mirror.outcome }}
+          MANIFEST_PARITY_CONCLUSION: ${{ steps.manifest-parity.outcome }}
         run: |
-          if [ "$VALIDATE_CONCLUSION" = "success" ]; then
+          if [ "$VALIDATE_CONCLUSION" = "success" ] && \
+             [ "$LIB_MIRROR_CONCLUSION" = "success" ] && \
+             [ "$MANIFEST_PARITY_CONCLUSION" = "success" ]; then
             {
               echo "## Agent Drift Detection Passed"
               echo ""
@@ -214,7 +286,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: check-paths
     if: |
-      needs.check-paths.outputs.should-validate == 'true' &&
+      needs.check-paths.outputs.should-run-drift == 'true' &&
       needs.check-paths.outputs.bypass-requested == 'true'
     permissions:
       contents: read
@@ -236,14 +308,16 @@ jobs:
 
       - name: Write bypass summary
         run: |
-          echo "## Agent Drift Detection - Bypassed" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Drift detection was skipped because a \`[skip-drift-check]\` marker was found in a commit message." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Bypass checklist:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "- [ ] Reason documented in PR description" >> "$GITHUB_STEP_SUMMARY"
-          echo "- [ ] \`templates/README.md\` updated with intentional difference" >> "$GITHUB_STEP_SUMMARY"
-          echo "- [ ] Explicit code-owner approval obtained" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Agent Drift Detection - Bypassed"
+            echo ""
+            echo "Drift detection was skipped because a \`[skip-drift-check]\` marker was found in a commit message."
+            echo ""
+            echo "**Bypass checklist:**"
+            echo "- [ ] Reason documented in PR description"
+            echo "- [ ] \`templates/README.md\` updated with intentional difference"
+            echo "- [ ] Explicit code-owner approval obtained"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ─── Skip job, provides passing status when no agent files changed ───────────
   # Uses the SAME NAME as the real validation job so required status checks pass.
@@ -251,7 +325,7 @@ jobs:
   skip:
     name: Agent Drift Detection
     needs: check-paths
-    if: needs.check-paths.outputs.should-validate != 'true'
+    if: needs.check-paths.outputs.should-run-drift != 'true'
     # ADR-025: ARM runner for cost optimization (37.5% savings vs x64)
     runs-on: ubuntu-24.04-arm
     permissions:

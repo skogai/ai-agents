@@ -383,7 +383,7 @@ flowchart LR
 
 ### Agent Catalog
 
-The Claude Code bundle ships 23 agents and the Copilot CLI bundle ships 24 (Copilot adds `backlog-generator`, Claude adds `spec-generator`; both bundles include the rest). Both bundles share the same templates.
+The Claude Code bundle ships 23 agents and the Copilot CLI bundle ships 24 (Copilot adds `backlog-generator`; both bundles include the rest). `spec-generator` is now a skill (issue #2001), available in both bundles. Both bundles share the same templates.
 
 | Agent | Purpose | Output | Bundle |
 |-------|---------|--------|--------|
@@ -410,7 +410,6 @@ The Claude Code bundle ships 23 agents and the Copilot CLI bundle ships 24 (Copi
 | **issue-feature-review** | Feature-request triage on GitHub issues | Constructive verdict with next steps | both |
 | **merge-resolver** | Resolve git/PR merge conflicts | Pattern-based resolution plan | both |
 | **negotiation** | Offer analysis and counter-proposals | Value-gap analysis with RADAR protocol | both |
-| **spec-generator** | Requirement specifications, EARS format | Structured specs with acceptance criteria | Claude Code only |
 | **backlog-generator** | Proactive task discovery when idle | Sized tasks from project state analysis | Copilot CLI only |
 
 See [AGENTS.md](AGENTS.md) for detailed agent documentation.
@@ -536,6 +535,7 @@ This project uses a **template-based generation system**. To modify agents:
 | [CLAUDE.md](CLAUDE.md) | Claude Code integration |
 | [copilot-instructions.md](.github/copilot-instructions.md) | GitHub Copilot integration |
 | [docs/workflow-commands.md](docs/workflow-commands.md) | Lifecycle commands (/spec, /plan, /build, /test, /review, /ship) |
+| [docs/when-to-use.md](docs/when-to-use.md) | Fitness guide: which lifecycle phases fit which task shapes, and when the full lifecycle is overkill |
 | [docs/ideation-workflow.md](docs/ideation-workflow.md) | Ideation workflow documentation |
 | [docs/markdown-linting.md](docs/markdown-linting.md) | Markdown standards |
 

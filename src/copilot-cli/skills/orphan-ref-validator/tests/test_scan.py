@@ -54,9 +54,13 @@ _spec.loader.exec_module(_scan)
 
 Finding = _scan.Finding
 ScanResult = _scan.ScanResult
+load_baseline = _scan.load_baseline
+BaselineError = _scan.BaselineError
 extract_count_claims = _scan.extract_count_claims
 extract_script_refs = _scan.extract_script_refs
 extract_skill_refs = _scan.extract_skill_refs
+extract_skill_script_refs = _scan.extract_skill_script_refs
+_check_skill_script_refs = _scan._check_skill_script_refs
 enumerate_count = _scan.enumerate_count
 enumerate_skills = _scan.enumerate_skills
 main = _scan.main
@@ -214,6 +218,42 @@ def test_ac3_existing_script_path_yields_no_finding(fake_repo):
     assert [f for f in result.findings if f.kind == "script_path"] == []
 
 
+# ---------- AC3 broad (PR2, issue #1994): .ps1 script paths ----------
+
+
+def test_ac3_broad_ps1_script_extractor():
+    """SCRIPT_REF_RE matches a backticked .ps1 path under a scanned prefix."""
+    text = "Old `scripts/Validate-SessionEnd.ps1` orphan."
+    refs = list(extract_script_refs(text))
+    assert refs == [(1, "scripts/Validate-SessionEnd.ps1")]
+
+
+def test_ac3_broad_non_script_suffix_not_matched():
+    """A backticked path with a non-script suffix is not a script_path ref."""
+    text = "See `scripts/notes.txt` and `scripts/data.json`."
+    assert list(extract_script_refs(text)) == []
+
+
+def test_ac3_broad_missing_ps1_yields_critical_finding(fake_repo):
+    target = fake_repo / "docs" / "spec.md"
+    write(target, "Call `scripts/Validate-Gone.ps1` before push.\n")
+    result = scan([target], fake_repo)
+    script_findings = [f for f in result.findings if f.kind == "script_path"]
+    assert len(script_findings) == 1
+    assert script_findings[0].referenced_entity == "scripts/Validate-Gone.ps1"
+    assert script_findings[0].severity == "critical"
+    assert result.verdict == "CRITICAL_FAIL"
+
+
+def test_ac3_broad_existing_ps1_yields_no_finding(fake_repo):
+    target = fake_repo / "docs" / "spec.md"
+    real = fake_repo / "scripts" / "Validate-Here.ps1"
+    write(real, "# real ps1\n")
+    write(target, "Call `scripts/Validate-Here.ps1` before push.\n")
+    result = scan([target], fake_repo)
+    assert [f for f in result.findings if f.kind == "script_path"] == []
+
+
 # ---------- AC4: count_claim detection ----------
 
 
@@ -241,6 +281,110 @@ def test_ac4_count_only_in_manifest_files(fake_repo):
     write(target, "We have 99 reusable skills.\n")
     result = scan([target], fake_repo)
     assert [f for f in result.findings if f.kind == "count_claim"] == []
+
+
+# ---------- AC4 --enforce-counts opt-in (PR2, issue #1994) ----------
+
+
+def test_enforce_counts_default_off_emits_no_count_finding(fake_repo):
+    """Default scan() (enforce_counts=False) extracts but does not emit
+    count_claim findings, preserving the canonical-source-mirror contract."""
+    plugin = fake_repo / ".claude-plugin" / "marketplace.json"
+    write(plugin, '{"description": "Catalog has 99 reusable skills."}')
+    result = scan([plugin], fake_repo)
+    assert [f for f in result.findings if f.kind == "count_claim"] == []
+    assert result.verdict == "PASS"
+
+
+def test_enforce_counts_on_emits_critical_on_divergence(fake_repo):
+    """With enforce_counts=True a divergent single-plugin count claim
+    (claimed 99, actual 2) in a plugin.json yields a critical count_claim
+    finding."""
+    plugin = fake_repo / ".claude" / ".claude-plugin" / "plugin.json"
+    write(plugin, '{"description": "Catalog has 99 reusable skills."}')
+    result = scan([plugin], fake_repo, enforce_counts=True)
+    count_findings = [f for f in result.findings if f.kind == "count_claim"]
+    assert len(count_findings) == 1
+    f = count_findings[0]
+    assert f.severity == "critical"
+    assert f.referenced_entity == "99 reusable skill"
+    assert f.expected == "99"
+    assert f.actual == "2"
+    assert result.verdict == "CRITICAL_FAIL"
+
+
+def test_enforce_counts_skips_multiplugin_marketplace(fake_repo):
+    """With enforce_counts=True a divergent count claim in a multi-plugin
+    marketplace.json is NOT emitted: enumerate_count enumerates the .claude/
+    tree only, so per-plugin marketplace claims cannot be validated against it.
+    Coverage for marketplace.json stays delegated to the canonical
+    build/scripts/validate_marketplace_counts.py."""
+    catalog = fake_repo / ".claude-plugin" / "marketplace.json"
+    write(
+        catalog,
+        '{"plugins": ['
+        '{"name": "claude-agents", "description": "Has 99 reusable skills."},'
+        '{"name": "project-toolkit", "description": "Has 7 reusable skills."}'
+        "]}",
+    )
+    result = scan([catalog], fake_repo, enforce_counts=True)
+    assert [f for f in result.findings if f.kind == "count_claim"] == []
+    assert result.verdict == "PASS"
+
+
+def test_enforce_counts_on_no_finding_when_count_matches(fake_repo):
+    """With enforce_counts=True a matching count claim (2 == 2) in a
+    plugin.json yields no finding."""
+    plugin = fake_repo / ".claude" / ".claude-plugin" / "plugin.json"
+    write(plugin, '{"description": "Catalog has 2 reusable skills."}')
+    result = scan([plugin], fake_repo, enforce_counts=True)
+    assert [f for f in result.findings if f.kind == "count_claim"] == []
+    assert result.verdict == "PASS"
+
+
+def test_enforce_counts_on_warns_when_count_undeterminable(tmp_path):
+    """With enforce_counts=True a count claim in a repo whose target dir is
+    absent yields a non-blocking warn finding, not a crash."""
+    repo = tmp_path / "no-skills"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    plugin = repo / ".claude" / ".claude-plugin" / "plugin.json"
+    write(plugin, '{"description": "Catalog has 7 reusable skills."}')
+    result = scan([plugin], repo, enforce_counts=True)
+    count_findings = [f for f in result.findings if f.kind == "count_claim"]
+    assert len(count_findings) == 1
+    assert count_findings[0].severity == "warn"
+    assert result.verdict == "WARN"
+
+
+def test_enforce_counts_cli_flag_flips_exit_code(fake_repo, capsys):
+    """The --enforce-counts CLI flag threads into scan(): a divergent count
+    claim in a plugin.json returns exit 0 without the flag and exit 1 with
+    it."""
+    plugin = fake_repo / ".claude" / ".claude-plugin" / "plugin.json"
+    write(plugin, '{"description": "Catalog has 99 reusable skills."}')
+    rc_off = main([
+        "--targets", str(plugin),
+        "--repo-root", str(fake_repo),
+    ])
+    assert rc_off == 0
+    capsys.readouterr()
+    rc_on = main([
+        "--targets", str(plugin),
+        "--repo-root", str(fake_repo),
+        "--enforce-counts",
+    ])
+    assert rc_on == 1
+
+
+def test_enforce_counts_default_off_via_cli(fake_repo):
+    """parse_args defaults enforce_counts to False so the bare CLI keeps the
+    delegated (no count_claim emission) behavior."""
+    args = _scan.parse_args([
+        "--targets", str(fake_repo / "x.md"),
+        "--repo-root", str(fake_repo),
+    ])
+    assert args.enforce_counts is False
 
 
 # ---------- AC5: envelope + verdict ----------
@@ -722,3 +866,237 @@ def test_main_emits_error_envelope_on_unexpected_runtime_failure(
     assert payload["Error"]["Type"] == "General"
     assert "simulated filesystem race" in payload["Error"]["Message"]
     assert "RuntimeError" in payload["Error"]["Message"]
+
+
+class TestSkillScriptRefs:
+    """Issue #1987: orphan references to .claude/skills/**/scripts/**.py,
+    backticked or as a bare `python3 ...` command."""
+
+    def test_bare_command_wrong_name_flagged(self, tmp_path):
+        scripts = tmp_path / ".claude" / "skills" / "github" / "scripts" / "pr"
+        scripts.mkdir(parents=True)
+        (scripts / "get_unresolved_review_threads.py").write_text("# real\n")
+        text = "python3 .claude/skills/github/scripts/pr/get_unresolved_threads.py --pull-request 1"
+        findings, checked = _check_skill_script_refs(text, "doc.md", tmp_path)
+        assert checked == 1
+        assert [f.kind for f in findings] == ["script_path"]
+        assert findings[0].severity == "critical"
+
+    def test_correct_name_not_flagged(self, tmp_path):
+        scripts = tmp_path / ".claude" / "skills" / "github" / "scripts" / "pr"
+        scripts.mkdir(parents=True)
+        (scripts / "get_unresolved_review_threads.py").write_text("# real\n")
+        text = "`.claude/skills/github/scripts/pr/get_unresolved_review_threads.py`"
+        findings, _ = _check_skill_script_refs(text, "doc.md", tmp_path)
+        assert findings == []
+
+    def test_extract_handles_both_forms(self):
+        assert list(extract_skill_script_refs("python3 .claude/skills/x/scripts/y.py")) == [
+            (1, ".claude/skills/x/scripts/y.py")
+        ]
+        assert list(extract_skill_script_refs("`src/copilot-cli/skills/x/scripts/y.py`")) == [
+            (1, "src/copilot-cli/skills/x/scripts/y.py")
+        ]
+
+
+class TestBaselineSuppression:
+    """Issue #2371: a default repo-wide scan must not fail on pre-existing
+    findings. A --baseline of known finding keys suppresses those findings so
+    the verdict is PASS/WARN, while a new finding not in the baseline still
+    drives CRITICAL_FAIL."""
+
+    def _orphan(self, fake_repo: Path) -> Finding:
+        target = fake_repo / "docs" / "stale.md"
+        write(target, "Use the `gamma-skill` for things.\n")
+        result = scan([target], fake_repo)
+        critical = [f for f in result.findings if f.severity == "critical"]
+        assert len(critical) == 1
+        return critical[0]
+
+    def test_baselined_critical_finding_yields_pass(self, fake_repo):
+        # Capture the orphan finding's key, then re-scan with it baselined.
+        orphan = self._orphan(fake_repo)
+        target = fake_repo / "docs" / "stale.md"
+        result = scan([target], fake_repo, baseline={orphan.key})
+        assert result.verdict == "PASS"
+        suppressed = [f for f in result.findings if f.suppressed]
+        assert len(suppressed) == 1
+        assert suppressed[0].referenced_entity == "gamma-skill"
+
+    def test_new_finding_not_in_baseline_yields_critical_fail(self, fake_repo):
+        # Baseline an unrelated key; the actual orphan is still active.
+        target = fake_repo / "docs" / "stale.md"
+        write(target, "Use the `gamma-skill` for things.\n")
+        result = scan([target], fake_repo, baseline={"other.md:1:skill_name:zeta-skill"})
+        assert result.verdict == "CRITICAL_FAIL"
+        active = [f for f in result.findings if not f.suppressed]
+        assert any(f.referenced_entity == "gamma-skill" for f in active)
+
+    def test_mixed_baselined_and_new_yields_critical_fail(self, fake_repo):
+        target = fake_repo / "docs" / "stale.md"
+        write(target, "Use `gamma-skill` and `delta-skill` here.\n")
+        full = scan([target], fake_repo)
+        keys = {f.key for f in full.findings if f.referenced_entity == "gamma-skill"}
+        assert keys, "expected gamma-skill orphan finding"
+        result = scan([target], fake_repo, baseline=keys)
+        # gamma-skill suppressed; delta-skill still active and critical.
+        assert result.verdict == "CRITICAL_FAIL"
+        suppressed = {f.referenced_entity for f in result.findings if f.suppressed}
+        active = {f.referenced_entity for f in result.findings if not f.suppressed}
+        assert "gamma-skill" in suppressed
+        assert "delta-skill" in active
+
+    def test_finding_key_format(self):
+        f = Finding(
+            kind="skill_name",
+            severity="critical",
+            target_file="docs/x.md",
+            line=7,
+            referenced_entity="gamma-skill",
+            recommendation="fix it",
+        )
+        assert f.key == "docs/x.md:7:skill_name:gamma-skill"
+
+    def test_load_baseline_plain_text(self, tmp_path):
+        bl = tmp_path / "baseline.txt"
+        bl.write_text(
+            "# pre-existing orphans\n"
+            "docs/a.md:1:skill_name:gamma-skill\n"
+            "\n"
+            "docs/b.md:2:script_path:scripts/old.py\n",
+            encoding="utf-8",
+        )
+        keys = load_baseline(bl)
+        assert keys == {
+            "docs/a.md:1:skill_name:gamma-skill",
+            "docs/b.md:2:script_path:scripts/old.py",
+        }
+
+    def test_load_baseline_json_list(self, tmp_path):
+        bl = tmp_path / "baseline.json"
+        bl.write_text(
+            json.dumps(["docs/a.md:1:skill_name:gamma-skill"]), encoding="utf-8"
+        )
+        assert load_baseline(bl) == {"docs/a.md:1:skill_name:gamma-skill"}
+
+    def test_load_baseline_json_envelope(self, tmp_path):
+        bl = tmp_path / "baseline.json"
+        envelope = {
+            "Data": {
+                "findings": [
+                    {
+                        "kind": "skill_name",
+                        "target_file": "docs/a.md",
+                        "line": 1,
+                        "referenced_entity": "gamma-skill",
+                    }
+                ]
+            }
+        }
+        bl.write_text(json.dumps(envelope), encoding="utf-8")
+        assert load_baseline(bl) == {"docs/a.md:1:skill_name:gamma-skill"}
+
+    def test_load_baseline_json_envelope_with_verdict_suffix(self, tmp_path):
+        bl = tmp_path / "baseline.json"
+        result = ScanResult(
+            findings=[
+                Finding(
+                    kind="skill_name",
+                    severity="critical",
+                    target_file="docs/a.md",
+                    line=1,
+                    referenced_entity="gamma-skill",
+                    recommendation="Remove stale reference.",
+                )
+            ]
+        )
+        bl.write_text(render_envelope(result, "json"), encoding="utf-8")
+        assert load_baseline(bl) == {"docs/a.md:1:skill_name:gamma-skill"}
+
+    def test_load_baseline_json_envelope_skips_null_key_fields(self, tmp_path):
+        bl = tmp_path / "baseline.json"
+        envelope = {
+            "Data": {
+                "findings": [
+                    {
+                        "kind": "skill_name",
+                        "target_file": "docs/a.md",
+                        "line": None,
+                        "referenced_entity": "gamma-skill",
+                    }
+                ]
+            }
+        }
+        bl.write_text(json.dumps(envelope), encoding="utf-8")
+        assert load_baseline(bl) == set()
+
+    def test_load_baseline_missing_file_raises(self, tmp_path):
+        with pytest.raises(BaselineError):
+            load_baseline(tmp_path / "nope.txt")
+
+    def test_load_baseline_bad_json_raises(self, tmp_path):
+        bl = tmp_path / "baseline.json"
+        bl.write_text("{not valid json", encoding="utf-8")
+        with pytest.raises(BaselineError):
+            load_baseline(bl)
+
+    def test_cli_baseline_file_suppresses(self, fake_repo, capsys):
+        target = fake_repo / "docs" / "stale.md"
+        write(target, "Use the `gamma-skill` for things.\n")
+        bl = fake_repo / "baseline.txt"
+        bl.write_text("docs/stale.md:1:skill_name:gamma-skill\n", encoding="utf-8")
+        rc = main(
+            [
+                "--targets",
+                str(target),
+                "--repo-root",
+                str(fake_repo),
+                "--baseline",
+                str(bl),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "VERDICT: PASS" in out
+
+    def test_cli_bad_baseline_file_is_config_error(self, fake_repo, capsys):
+        rc = main(
+            [
+                "--repo-root",
+                str(fake_repo),
+                "--baseline",
+                str(fake_repo / "missing.txt"),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "VERDICT: ERROR" in out
+
+    def test_cli_baseline_path_outside_repo_is_config_error(self, fake_repo, capsys):
+        outside = fake_repo.parent / "baseline.txt"
+        outside.write_text("docs/stale.md:1:skill_name:gamma-skill\n", encoding="utf-8")
+        rc = main(
+            [
+                "--repo-root",
+                str(fake_repo),
+                "--baseline",
+                str(outside),
+            ]
+        )
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "baseline path escapes repository root" in out
+        assert "VERDICT: ERROR" in out
+
+    def test_truncation_keeps_active_findings_before_suppressed(self, fake_repo):
+        target = fake_repo / "docs" / "stale.md"
+        write(target, "Use `gamma-skill` and `delta-skill` here.\n")
+        full = scan([target], fake_repo)
+        gamma_keys = {
+            f.key for f in full.findings if f.referenced_entity == "gamma-skill"
+        }
+        assert gamma_keys, "expected gamma-skill orphan finding"
+        result = scan([target], fake_repo, max_findings=2, baseline=gamma_keys)
+        active = [f for f in result.findings if not f.suppressed]
+        assert result.verdict == "CRITICAL_FAIL"
+        assert any(f.referenced_entity == "delta-skill" for f in active)

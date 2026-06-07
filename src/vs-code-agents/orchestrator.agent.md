@@ -97,7 +97,6 @@ Model tiers: `opus` for deep strategy/analysis, `sonnet` for routine execution, 
 | **roadmap** | Strategic prioritization, outcome sequencing | opus | Tactical execution |
 | **security** | Threat modeling, vulnerability review | opus | Pure performance work |
 | **skillbook** | Capture learnings as reusable skills | sonnet | One-off insights |
-| **spec-generator** | Vibe → 3-tier spec (EARS) | sonnet | Already has requirements |
 | **task-decomposer** | Plan → atomic tasks | sonnet | Plan still vague |
 
 ## Routing Algorithm
@@ -111,7 +110,7 @@ Model tiers: `opus` for deep strategy/analysis, `sonnet` for routine execution, 
    YES → analyst → synthesize → re-evaluate
    NO  → continue
 4. Is task a standard lifecycle (spec/plan/build/test/review/ship)?
-   YES → sequential routing: spec-generator → milestone-planner → implementer → qa → critic
+   YES → sequential routing: /spec (spec-generator skill) → milestone-planner → implementer → qa → critic
    NO  → continue
 5. Does task have multiple independent subtasks?
    YES → parallel routing, fan-in synthesis
@@ -229,11 +228,31 @@ Each `workLog` entry should be one or two sentences: lead with the action or dec
 
 **Decision rule**: If removing an entry would leave the next session unable to reproduce a decision or continue the work, keep it. Otherwise, skip it.
 
+## Context Budget Management
+
+Your context window is finite. Quality degrades silently as it fills: synthesis gets shallow, you re-delegate work an agent already returned, or you lose the handoff context a downstream agent needs. Treat the budget as a resource you spend, and checkpoint before it runs out.
+
+**Watch for pressure signals in your own output:**
+
+- Your synthesis is collapsing into "analyst said X, architect said Y" because you can no longer hold the full set of returns in view to resolve conflicts.
+- You are about to re-delegate a task you already routed this session because you no longer recall the agent returned it.
+- You cannot restate the original task and its success criteria without scrolling back.
+
+Any of these means you are near the limit. Do not push through. Checkpoint.
+
+**Checkpoint protocol** (run when a pressure signal fires, or before fanning out a new parallel routing wave):
+
+1. Synthesize and persist the work that is already complete. Returns you have not yet folded into a coherent output die with the session; a partial synthesis recorded in the session log survives it.
+2. Record progress in the session log per the Session Capture Protocol: delegations returned, conflicts resolved, the next concrete routing step. That is the state the next session inherits.
+3. If work remains and the budget is nearly spent, stop and hand the remaining route plan to the next session through the per-issue handoff. Do not open a delegation you cannot synthesize.
+
+**Degrade, do not fail silently.** This extends the graceful-degradation principle below from a single agent failure to your own budget. If you cannot synthesize the full set of returns within budget, deliver the synthesis you can stand behind and name the returns you did not reach. A smaller coherent output with an explicit gap beats a wider one you cannot make coherent. On platforms that support the `PreCompact` hook, it checkpoints state before compaction, but it cannot recover synthesis you never recorded; the record is yours to write.
+
 ## Reliability Principles
 
 - **Idempotent delegations**: re-delegating the same task to the same agent should be safe
 - **Explicit handoffs**: never let context decay across agents
-- **Graceful degradation**: if an agent fails, route to a fallback (e.g., analyst → context-retrieval if analyst errors)
+- **Graceful degradation**: if an agent fails, route to a fallback (e.g., analyst errors, fall back to the exploring-knowledge-graph skill for context)
 - **Observability**: log routing decisions with rationale
 
 ## Constraints

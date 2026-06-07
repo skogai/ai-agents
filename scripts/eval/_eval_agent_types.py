@@ -15,7 +15,13 @@ SCHEMA_VERSION: int = 1
 
 # Provenance values per REQ-004 AC-4.
 ProvenanceLiteral = Literal["synthetic", "public-cve", "paraphrased-from-public"]
-VariantLiteral = Literal["agent", "baseline"]
+# Issue #1875 (form-factor eval, follow-on to ADR-058) adds the `skill`
+# variant: the same domain content the `agent` variant carries in a subagent
+# system prompt, delivered instead as a SKILL.md read into the parent's
+# context and reasoned over inline in a single model call (no subagent
+# dispatch). The three variants let the report compute the three pairwise
+# CIs the issue specifies: agent-baseline, skill-baseline, agent-skill.
+VariantLiteral = Literal["agent", "baseline", "skill"]
 OutcomeLiteral = Literal["success", "error"]
 # ADR-058 promotes `halt-due-to-flakiness` to a fourth verdict outcome
 # emitted when REQ-004 AC-10's flakiness gate trips. The runtime, the
@@ -176,6 +182,7 @@ class Report:
     pricing_rate_as_of: str
     flaky_fixtures_detected: list[str] = field(default_factory=list)
     flaky_fixtures_excluded: list[str] = field(default_factory=list)
+    flaky_halt_threshold_crossed: bool = False
     tokens_estimated: bool = True
     recommendation: RecommendationLiteral | None = None
     recommendation_default: str | None = None

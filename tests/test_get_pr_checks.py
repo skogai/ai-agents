@@ -37,6 +37,112 @@ build_parser = _mod.build_parser
 normalize_check = _mod.normalize_check
 fetch_checks = _mod.fetch_checks
 build_output = _mod.build_output
+dedupe_checks = _mod.dedupe_checks
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _check(name: str, *, passing=False, failing=False, pending=False,
+           required=True, state="COMPLETED", conclusion="", details=""):
+    """Build a normalized check dict for dedupe tests."""
+    return {
+        "Name": name,
+        "Type": "CheckRun",
+        "State": state,
+        "Conclusion": conclusion,
+        "DetailsUrl": details,
+        "IsRequired": required,
+        "IsPending": pending,
+        "IsPassing": passing,
+        "IsFailing": failing,
+    }
+
+
+def _check_run_node(name, status, conclusion, *, required=True):
+    return {
+        "__typename": "CheckRun",
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+        "detailsUrl": "",
+        "isRequired": required,
+    }
+
+
+def _rollup_response(
+    nodes,
+    state="FAILURE",
+    number=2201,
+    *,
+    oid="abc123",
+    page_info=None,
+    total_count=None,
+):
+    contexts = {
+        "nodes": nodes,
+    }
+    if page_info is not None:
+        contexts["pageInfo"] = page_info
+    if total_count is not None:
+        contexts["totalCount"] = total_count
+    return {
+        "repository": {
+            "pullRequest": {
+                "number": number,
+                "commits": {
+                    "nodes": [
+                        {"commit": {"statusCheckRollup": {
+                            "state": state,
+                            "contexts": contexts,
+                        }}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def _rollup_response_with_commit_oid(
+    nodes,
+    state="FAILURE",
+    number=2201,
+    *,
+    oid="abc123",
+    page_info=None,
+    total_count=None,
+):
+    response = _rollup_response(
+        nodes,
+        state,
+        number,
+        oid=oid,
+        page_info=page_info,
+        total_count=total_count,
+    )
+    commit = response["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]
+    commit["oid"] = oid
+    return response
+
+
+def _contexts_page_response(nodes, *, has_next=False, end_cursor=None):
+    return {
+        "repository": {
+            "object": {
+                "statusCheckRollup": {
+                    "contexts": {
+                        "pageInfo": {
+                            "hasNextPage": has_next,
+                            "endCursor": end_cursor,
+                        },
+                        "nodes": nodes,
+                    },
+                },
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +228,20 @@ class TestNormalizeCheck:
         }
         result = normalize_check(ctx)
         assert result["IsPending"] is True
+
+    @pytest.mark.parametrize("conclusion", ["STALE", "STARTUP_FAILURE"])
+    def test_check_run_stale_and_startup_failure_are_failing(self, conclusion):
+        ctx = {
+            "__typename": "CheckRun",
+            "name": "build",
+            "status": "COMPLETED",
+            "conclusion": conclusion,
+            "detailsUrl": "",
+            "isRequired": True,
+        }
+        result = normalize_check(ctx)
+        assert result["IsFailing"] is True
+        assert result["IsPassing"] is False
 
     def test_status_context(self):
         ctx = {
@@ -703,6 +823,161 @@ class TestMain:
         captured = capsys.readouterr()
         assert captured.err == ""
 
+    def test_wait_transient_empty_tags_incomplete(self, capsys):
+        """#2304: --wait that exhausts its budget while the rollup is empty
+        returns 7 and tags ChecksIncomplete, not a premature PASS."""
+        empty_gql = {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "state": "PENDING",
+                                        "contexts": {"nodes": []},
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+        with patch("get_pr_checks.assert_gh_authenticated"), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql", return_value=empty_gql,
+        ), patch(
+            "get_pr_checks.time.monotonic", side_effect=[0.0, 999.0],
+        ), patch("get_pr_checks.time.sleep"):
+            rc = main([
+                "--pull-request", "42", "--wait",
+                "--timeout-seconds", "10", "--output-format", "json",
+            ])
+        assert rc == 7
+        output = json.loads(capsys.readouterr().out)
+        assert output["Data"]["ChecksIncomplete"] is True
+
+    def test_wait_genuine_no_checks_settles_immediately(self, capsys):
+        """#2304: --wait settles missing rollups as real no-check PRs."""
+        no_checks_gql = {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+                },
+            },
+        }
+        with patch("get_pr_checks.assert_gh_authenticated"), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql", return_value=no_checks_gql,
+        ), patch("get_pr_checks.time.sleep") as sleep_mock:
+            rc = main([
+                "--pull-request", "42", "--wait",
+                "--timeout-seconds", "10", "--output-format", "json",
+            ])
+        assert rc == 0
+        sleep_mock.assert_not_called()
+        output = json.loads(capsys.readouterr().out)["Data"]
+        assert output["HasChecks"] is False
+        assert output["ChecksIncomplete"] is False
+
+    def test_wait_empty_then_populated_settles(self, capsys):
+        """#2304: a transient empty poll must not terminate --wait; once the
+        rollup populates, the populated result wins (no false 'no checks')."""
+        empty_gql = {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "state": "PENDING",
+                                        "contexts": {"nodes": []},
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+        passing_gql = {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "state": "SUCCESS",
+                                        "contexts": {
+                                            "nodes": [
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "build",
+                                                    "status": "COMPLETED",
+                                                    "conclusion": "SUCCESS",
+                                                    "detailsUrl": "",
+                                                    "isRequired": True,
+                                                },
+                                            ],
+                                        },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+        with patch("get_pr_checks.assert_gh_authenticated"), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql", side_effect=[empty_gql, passing_gql],
+        ), patch(
+            "get_pr_checks.time.monotonic", side_effect=[0.0, 1.0],
+        ), patch("get_pr_checks.time.sleep"):
+            rc = main([
+                "--pull-request", "42", "--wait",
+                "--timeout-seconds", "60", "--output-format", "json",
+            ])
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)["Data"]
+        assert output["ChecksIncomplete"] is False
+        assert output["PassedCount"] == 1
+        assert output["AllPassing"] is True
+
+    def test_no_checks_without_wait_not_incomplete(self, capsys):
+        """#2304: without --wait, an empty rollup is reported immediately as a
+        genuine no-checks PR (ChecksIncomplete False), unchanged behavior."""
+        empty_gql = {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+                },
+            },
+        }
+        with patch("get_pr_checks.assert_gh_authenticated"), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch("get_pr_checks.gh_graphql", return_value=empty_gql):
+            rc = main(["--pull-request", "42", "--output-format", "json"])
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)["Data"]
+        assert output["HasChecks"] is False
+        assert output["ChecksIncomplete"] is False
+
 
 # ---------------------------------------------------------------------------
 # Tests: normalize_check - additional coverage
@@ -906,6 +1181,40 @@ class TestBuildOutputAdditional:
         assert output["PendingCount"] == 1
         assert output["AllPassing"] is False
 
+    def test_failed_pending_duplicate_counts_as_failed_and_pending(self):
+        checks = dedupe_checks([
+            _check("build", failing=True, conclusion="FAILURE"),
+            _check("build", pending=True, state="IN_PROGRESS"),
+        ])
+        check_data = {
+            "Number": 42,
+            "HasChecks": True,
+            "OverallState": "FAILURE",
+            "Checks": checks,
+        }
+        output = build_output(check_data, "o", "r")
+        assert output["FailedCount"] == 1
+        assert output["PendingCount"] == 1
+        assert output["FailedRequiredChecks"] == ["build"]
+        assert output["PendingRequiredChecks"] == ["build"]
+        assert output["AllPassing"] is False
+
+    def test_passing_pending_duplicate_counts_as_pending_not_all_passing(self):
+        checks = dedupe_checks([
+            _check("build", passing=True, conclusion="SUCCESS"),
+            _check("build", pending=True, state="IN_PROGRESS"),
+        ])
+        check_data = {
+            "Number": 42,
+            "HasChecks": True,
+            "OverallState": "PENDING",
+            "Checks": checks,
+        }
+        output = build_output(check_data, "o", "r")
+        assert output["FailedCount"] == 0
+        assert output["PendingCount"] == 1
+        assert output["AllPassing"] is False
+
     def test_has_checks_false(self):
         check_data = {
             "Number": 42,
@@ -915,3 +1224,440 @@ class TestBuildOutputAdditional:
         }
         output = build_output(check_data, "o", "r")
         assert output["AllPassing"] is False
+
+    def test_null_checks_list_is_empty(self):
+        check_data = {
+            "Number": 42,
+            "HasChecks": True,
+            "OverallState": "UNKNOWN",
+            "Checks": None,
+        }
+        output = build_output(check_data, "o", "r")
+        assert output["Checks"] == []
+        assert output["AllPassing"] is False
+
+    def test_malformed_checks_payload_is_rejected(self):
+        check_data = {
+            "Number": 42,
+            "HasChecks": True,
+            "OverallState": "UNKNOWN",
+            "Checks": {"Name": "build"},
+        }
+        with pytest.raises(ValueError, match="Checks must be a list"):
+            build_output(check_data, "o", "r")
+
+
+# ---------------------------------------------------------------------------
+# Tests: dedupe_checks (superseded check runs, Issue #2208)
+# ---------------------------------------------------------------------------
+
+
+class TestDedupeChecks:
+    def test_empty_list_returns_empty(self):
+        assert dedupe_checks([]) == []
+
+    def test_single_check_passes_through(self):
+        checks = [_check("build", passing=True)]
+        assert dedupe_checks(checks) == checks
+
+    def test_distinct_names_preserved_in_order(self):
+        checks = [
+            _check("build", passing=True),
+            _check("test", failing=True),
+            _check("lint", pending=True),
+        ]
+        result = dedupe_checks(checks)
+        assert [c["Name"] for c in result] == ["build", "test", "lint"]
+
+    def test_passing_supersedes_earlier_failure(self):
+        """A re-run SUCCESS wins over a stale FAILURE for the same name."""
+        checks = [
+            _check("Validate PR", failing=True, conclusion="FAILURE"),
+            _check("Validate PR", passing=True, conclusion="SUCCESS"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsPassing"] is True
+        assert result[0]["IsFailing"] is False
+
+    def test_passing_supersedes_later_failure(self):
+        """Order does not matter: a passing run wins even when seen first."""
+        checks = [
+            _check("Validate PR", passing=True, conclusion="SUCCESS"),
+            _check("Validate PR", failing=True, conclusion="FAILURE"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsPassing"] is True
+
+    def test_required_status_survives_when_any_duplicate_is_required(self):
+        """A required duplicate keeps the deduped row required."""
+        checks = [
+            _check("security", passing=True, conclusion="SUCCESS", required=False),
+            _check("security", failing=True, conclusion="FAILURE", required=True),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsPassing"] is True
+        assert result[0]["IsRequired"] is True
+
+    def test_null_name_collapses_to_empty_name(self):
+        """Explicit null names dedupe through the empty-name bucket."""
+        checks = [
+            {**_check("ignored", failing=True, conclusion="FAILURE"), "Name": None},
+            {**_check("", passing=True, conclusion="SUCCESS"), "Name": ""},
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["Name"] == ""
+        assert result[0]["IsPassing"] is True
+
+    def test_real_failure_with_no_passing_run_survives(self):
+        """No passing run means the failing entry is kept (true failure)."""
+        checks = [
+            _check("test", failing=True, conclusion="FAILURE"),
+            _check("test", failing=True, conclusion="TIMED_OUT"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsFailing"] is True
+
+    def test_failure_supersedes_unknown_conclusion(self):
+        """Unknown conclusions do not hide real failures."""
+        checks = [
+            _check("test", conclusion="UNKNOWN"),
+            _check("test", failing=True, conclusion="FAILURE"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["Conclusion"] == "FAILURE"
+        assert result[0]["IsFailing"] is True
+
+    def test_failure_supersedes_pending_but_keeps_pending_signal(self):
+        """A pending re-run keeps wait polling active after a failure."""
+        checks = [
+            _check("build", failing=True, conclusion="FAILURE"),
+            _check("build", pending=True, state="IN_PROGRESS"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsFailing"] is True
+        assert result[0]["IsPending"] is True
+
+    def test_passing_supersedes_pending_but_keeps_pending_signal(self):
+        """A same-name pending run keeps wait polling active."""
+        checks = [
+            _check("build", pending=True, state="IN_PROGRESS"),
+            _check("build", passing=True, conclusion="SUCCESS"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsPassing"] is True
+        assert result[0]["IsPending"] is True
+
+    def test_status_context_dedupes_by_name(self):
+        """StatusContext entries dedupe by Name like CheckRun entries."""
+        checks = [
+            {
+                "Name": "ci/travis", "Type": "StatusContext",
+                "State": "FAILURE", "Conclusion": "FAILURE", "DetailsUrl": "",
+                "IsRequired": True, "IsPending": False,
+                "IsPassing": False, "IsFailing": True,
+            },
+            {
+                "Name": "ci/travis", "Type": "StatusContext",
+                "State": "SUCCESS", "Conclusion": "SUCCESS", "DetailsUrl": "",
+                "IsRequired": True, "IsPending": False,
+                "IsPassing": True, "IsFailing": False,
+            },
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["IsPassing"] is True
+
+    def test_check_run_preferred_over_same_name_status_context(self):
+        """A StatusContext duplicate cannot mask a failing CheckRun."""
+        checks = [
+            {
+                "Name": "build", "Type": "StatusContext",
+                "State": "SUCCESS", "Conclusion": "SUCCESS", "DetailsUrl": "",
+                "IsRequired": True, "IsPending": False,
+                "IsPassing": True, "IsFailing": False,
+            },
+            _check("build", failing=True, conclusion="FAILURE"),
+        ]
+        result = dedupe_checks(checks)
+        assert len(result) == 1
+        assert result[0]["Type"] == "CheckRun"
+        assert result[0]["IsFailing"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: fetch_checks + main with superseded runs (Issue #2208 scenario)
+# ---------------------------------------------------------------------------
+
+
+class TestSupersededCheckRuns:
+    def test_fetch_checks_collapses_superseded_failure(self):
+        """fetch_checks dedupes a stale FAILURE against a fresh SUCCESS."""
+        nodes = [
+            _check_run_node("Validate PR", "COMPLETED", "FAILURE"),
+            _check_run_node("Validate PR", "COMPLETED", "SUCCESS"),
+        ]
+        with patch(
+            "get_pr_checks.gh_graphql",
+            return_value=_rollup_response(nodes),
+        ):
+            result = fetch_checks("o", "r", 2201)
+        assert len(result["Checks"]) == 1
+        assert result["Checks"][0]["IsPassing"] is True
+
+    def test_main_superseded_failure_returns_0(self, capsys):
+        """End-to-end: PR #2201 shape (stale FAILURE + fresh SUCCESS) is ready.
+
+        Reproduces Issue #2208: an older Validate PR run failed while a newer
+        run succeeded on the same commit. Before the fix, FailedCount was 1
+        and the exit code was 1; after dedupe it is 0.
+        """
+        nodes = [
+            _check_run_node("Validate PR", "COMPLETED", "FAILURE"),
+            _check_run_node("Validate PR", "COMPLETED", "SUCCESS"),
+        ]
+        with patch(
+            "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql",
+            return_value=_rollup_response(nodes),
+        ):
+            rc = main(["--pull-request", "2201"])
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["Data"]["FailedCount"] == 0
+        assert output["Data"]["PassedCount"] == 1
+        assert output["Data"]["AllPassing"] is True
+
+    def test_main_genuine_failure_still_returns_1(self, capsys):
+        """A name with only failing runs still blocks (no false PASS)."""
+        nodes = [
+            _check_run_node("test", "COMPLETED", "FAILURE"),
+            _check_run_node("test", "COMPLETED", "FAILURE"),
+        ]
+        with patch(
+            "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql",
+            return_value=_rollup_response(nodes),
+        ):
+            rc = main(["--pull-request", "42"])
+        assert rc == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["Data"]["FailedCount"] == 1
+
+    def test_main_cancelled_then_success_required_only_returns_0(self, capsys):
+        """Regression for issue #2308: stale CANCELLED + fresh SUCCESS on a
+        required check should exit 0 under --required-only.
+
+        Reproduces PR #2289: ``Validate PR`` and ``Validate PR title`` each had
+        a stale CANCELLED run alongside a fresh SUCCESS, both required. Before
+        the fix this exited 1 and reported OverallState=FAILURE; after dedupe
+        the SUCCESS wins and the script reports AllPassing=true.
+        """
+        nodes = [
+            _check_run_node("Validate PR", "COMPLETED", "CANCELLED"),
+            _check_run_node("Validate PR", "COMPLETED", "SUCCESS"),
+            _check_run_node("Validate PR title", "COMPLETED", "CANCELLED"),
+            _check_run_node("Validate PR title", "COMPLETED", "SUCCESS"),
+        ]
+        with patch(
+            "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+            "get_pr_checks.resolve_repo_params",
+            return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+            "get_pr_checks.gh_graphql",
+            return_value=_rollup_response(nodes),
+        ):
+            rc = main(["--pull-request", "2289", "--required-only"])
+        assert rc == 0
+        output = json.loads(capsys.readouterr().out)
+        data = output["Data"]
+        assert data["FailedCount"] == 0
+        assert data["PassedCount"] == 2
+        assert data["AllPassing"] is True
+        # Each required check name appears exactly once after dedupe.
+        names = [c["Name"] for c in data["Checks"]]
+        assert names.count("Validate PR") == 1
+        assert names.count("Validate PR title") == 1
+
+    def test_dual_row_required_or_semantics(self, capsys):
+        """Issue #2325: When a check name has both CheckRun (not required) and
+        StatusContext (required), --required-only should include it because any
+        row carries isRequired=true.
+
+        Reproduces scenario: Analyst and QA checks publish both a CheckRun and a
+        StatusContext; the CheckRun is isRequired=false but the StatusContext is
+        isRequired=true. The name should be treated as required.
+        """
+        nodes = [
+           {
+               "__typename": "CheckRun",
+               "name": "Analyst",
+               "status": "IN_PROGRESS",
+               "conclusion": "",
+               "detailsUrl": "",
+               "isRequired": False,
+           },
+           {
+               "__typename": "StatusContext",
+               "context": "Analyst",
+               "state": "PENDING",
+               "targetUrl": "",
+               "isRequired": True,
+           },
+           {
+              "__typename": "CheckRun",
+              "name": "QA",
+              "status": "IN_PROGRESS",
+              "conclusion": "",
+              "detailsUrl": "",
+              "isRequired": False,
+           },
+           {
+              "__typename": "StatusContext",
+              "context": "QA",
+              "state": "PENDING",
+              "targetUrl": "",
+              "isRequired": True,
+           },
+        ]
+        with patch(
+           "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+           "get_pr_checks.resolve_repo_params",
+           return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+           "get_pr_checks.gh_graphql",
+           return_value=_rollup_response(nodes),
+        ):
+           rc = main(["--pull-request", "2325", "--required-only"])
+        output = json.loads(capsys.readouterr().out)
+        data = output["Data"]
+        assert data["PendingCount"] == 2
+        names = [c["Name"] for c in data["Checks"]]
+        assert "Analyst" in names
+        assert "QA" in names
+        assert data["PendingRequiredChecks"] == ["Analyst", "QA"]
+        checks = {c["Name"]: c for c in data["Checks"]}
+        assert checks["Analyst"]["IsRequired"] is True
+        assert checks["QA"]["IsRequired"] is True
+
+    def test_failed_required_check_required_only_includes_failed_list(self, capsys):
+        """Issue #2325: --required-only output should expose FailedRequiredChecks
+        list so downstream agents can distinguish pending vs. failed required checks.
+
+        When a required check fails, it must appear in both Checks[] and
+        FailedRequiredChecks[] (new field).
+        """
+        nodes = [
+           _check_run_node("CI/lint", "COMPLETED", "FAILURE", required=True),
+           _check_run_node("CI/test", "IN_PROGRESS", "", required=True),
+        ]
+        with patch(
+           "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+           "get_pr_checks.resolve_repo_params",
+           return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+           "get_pr_checks.gh_graphql",
+           return_value=_rollup_response(nodes),
+        ):
+           rc = main(["--pull-request", "2325", "--required-only"])
+        output = json.loads(capsys.readouterr().out)
+        data = output["Data"]
+        # Should have both failed and pending required checks visible.
+        assert data["FailedCount"] == 1
+        assert data["PendingCount"] == 1
+        # New fields for structured output to downstream agents.
+        assert "FailedRequiredChecks" in data, \
+           "Expected FailedRequiredChecks list in --required-only output"
+        assert "PendingRequiredChecks" in data, \
+           "Expected PendingRequiredChecks list in --required-only output"
+        assert "CI/lint" in data["FailedRequiredChecks"], \
+           "Expected failed required check in FailedRequiredChecks list"
+        assert "CI/test" in data["PendingRequiredChecks"], \
+           "Expected pending required check in PendingRequiredChecks list"
+
+    def test_required_only_paginates_pending_review_checks(self, capsys):
+        """Issue #2325: required review checks after the first 100 contexts
+        must stay visible to --required-only callers."""
+        first_page = _rollup_response_with_commit_oid(
+            [_check_run_node("Validate PR", "COMPLETED", "SUCCESS", required=True)],
+            state="PENDING",
+            page_info={"hasNextPage": True, "endCursor": "cursor-1"},
+            total_count=102,
+        )
+        second_page = _contexts_page_response([
+            {
+               "__typename": "CheckRun",
+               "name": "Analyst Review",
+               "status": "QUEUED",
+               "conclusion": "",
+               "detailsUrl": "",
+               "isRequired": True,
+            },
+            {
+               "__typename": "CheckRun",
+               "name": "QA Review",
+               "status": "QUEUED",
+               "conclusion": "",
+               "detailsUrl": "",
+               "isRequired": True,
+            },
+        ])
+        with patch(
+           "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+           "get_pr_checks.resolve_repo_params",
+           return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+           "get_pr_checks.gh_graphql",
+           side_effect=[first_page, second_page],
+        ):
+           rc = main(["--pull-request", "2325", "--required-only"])
+
+        output = json.loads(capsys.readouterr().out)
+        data = output["Data"]
+        assert rc == 0
+        assert data["PendingRequiredChecks"] == ["Analyst Review", "QA Review"]
+        assert data["PendingCount"] == 2
+        assert data["AllPassing"] is False
+
+    def test_required_only_fails_closed_when_contexts_page_missing(self, capsys):
+        first_page = _rollup_response_with_commit_oid(
+            [_check_run_node("Validate PR", "COMPLETED", "SUCCESS", required=True)],
+            state="PENDING",
+            page_info={"hasNextPage": True, "endCursor": None},
+            total_count=101,
+        )
+        with patch(
+           "get_pr_checks.assert_gh_authenticated",
+        ), patch(
+           "get_pr_checks.resolve_repo_params",
+           return_value=RepoInfo(owner="o", repo="r"),
+        ), patch(
+           "get_pr_checks.gh_graphql",
+           return_value=first_page,
+        ):
+           rc = main(["--pull-request", "2325", "--required-only"])
+
+        output = json.loads(capsys.readouterr().out)
+        data = output["Data"]
+        assert rc == 7
+        assert data["ChecksIncomplete"] is True
+        assert data["AllPassing"] is False

@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 
 dependencies = [
-    "anthropic==0.105.2",
+    "anthropic==0.107.0",
     "markdown-it-py>=4.2.0",
     "python-frontmatter==1.3.0",
     "PyYAML==6.0.3",
@@ -20,7 +20,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "bandit>=1.9.4",
     "pip-audit>=2.10.0",
-    "ruff>=0.15.14",
+    "ruff>=0.15.15",
     "mypy>=2.1.0",
 ]
 
@@ -42,6 +42,7 @@ markers = [
     "unit: Unit tests",
     "integration: Integration tests",
     "security: Security-focused tests",
+    "smoke: Real-CLI smoke tests (need auth/credits; nightly only). The smoke gate asserts these were not skipped (issue #2231 item 4).",
 ]
 
 [tool.coverage.run]

@@ -37,10 +37,8 @@ Use these scripts instead of raw `gh` commands for consistent error handling and
 | `create a PR` | new_pr.py |
 | `respond to review comments` | post_pr_comment_reply.py |
 | `check CI status` | get_pr_checks.py / get_pr_check_logs.py |
-| `close issue` | close_pr.py / set_issue_labels.py |
-| `add label to issue` | set_issue_labels.py |
-| `list actionable items` | get_actionable_items.py |
-| `check notifications` | get_actionable_items.py |
+| `close issue, add label to issue` | close_pr.py / set_issue_labels.py |
+| `list actionable items, check notifications` | get_actionable_items.py |
 
 ---
 
@@ -93,13 +91,14 @@ Need GitHub data?
 |--------|---------|----------------|
 | `get_pull_requests.py` | List PRs with filters | `--state`, `--label`, `--author`, `--base`, `--head`, `--search`, `--limit` |
 | `get_pr_context.py` | PR metadata, diff, files | `--pull-request`, `--include-changed-files`, `--include-diff` |
-| `get_pr_checks.py` | CI check status, polling | `--pull-request`, `--wait`, `--timeout-seconds`, `--required-only`, `--output-format {json,text}` |
+| `get_pr_checks.py` | CI check status, polling | `--pull-request`, `--wait`, `--timeout-seconds`, `--required-only`, `--output-format {json,human,auto}` |
 | `get_pr_check_logs.py` | Fetch logs from failing CI checks | `--pull-request`, `--max-lines`, `--context-lines` |
 | `get_pr_review_comments.py` | Paginated review comments with stale detection | `--pull-request`, `--include-issue-comments`, `--detect-stale`, `--exclude-stale`, `--only-stale` |
 | `get_pr_review_threads.py` | Thread-level review data | `--pull-request`, `--unresolved-only` |
 | `get_pr_reviewers.py` | Enumerate unique reviewers | `--pull-request`, `--exclude-bots` |
 | `get_unaddressed_comments.py` | Bot comments needing attention | `--pull-request` |
 | `get_unresolved_review_threads.py` | Unresolved thread IDs | `--pull-request` |
+| `wait_for_unresolved_zero.py` | Settling gate: poll until unresolved count holds at zero across bot scans | `--pull-request`, `--interval-seconds`, `--max-wait-seconds`, `--strict-pagination` |
 | `test_pr_merged.py` | Check if PR is merged | `--pull-request` |
 | `detect_copilot_followup_pr.py` | Detect Copilot follow-up PRs | `--pr-number`, `--owner`, `--repo` |
 | `post_pr_comment_reply.py` | Thread-preserving replies | `--pull-request`, `--comment-id`, `--body` |
@@ -120,8 +119,11 @@ Need GitHub data?
 
 | Script | Purpose | Key Parameters |
 |--------|---------|----------------|
-| `get_issue_context.py` | Issue metadata | `--issue` |
+| `get_issue_context.py` | Issue metadata (no comments) | `--issue` |
+| `get_issue_comments.py` | Issue comment thread (discourse) | `--issue`, `--limit` |
 | `new_issue.py` | Create new issue | `--title`, `--body`, `--labels` |
+| `close_issue.py` | Close with optional comment (`--verify-claims` aborts when a cited commit/PR does not resolve on the remote) | `--issue`, `--reason`, `--comment`, `--verify-claims` |
+| `reopen_issue.py` | Reopen with optional comment | `--issue`, `--comment` |
 | `set_issue_labels.py` | Apply labels (auto-create) | `--issue`, `--labels`, `--priority` |
 | `set_issue_milestone.py` | Assign milestone | `--issue`, `--milestone` |
 | `post_issue_comment.py` | Comments with idempotency | `--issue`, `--body`, `--marker` |

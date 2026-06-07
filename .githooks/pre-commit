@@ -56,6 +56,25 @@ echo_action() {
     echo -e "${CYAN}FIXING:${NC} $1"
 }
 
+# Print the number of non-empty lines in $1 on stdout, as a single integer
+# with no trailing whitespace. Always exits 0; never emits more than one
+# line. Empty input prints 0.
+#
+# Replaces the bug-prone idiom `echo "$VAR" | grep -c . || echo 0`, which on
+# empty input produced `"0\n0"` (grep -c printed 0 and exited 1, then the
+# fallback appended another 0). Command substitution then yielded a two-line
+# value that broke arithmetic with `syntax error in expression`. See #2442.
+count_nonempty_lines() {
+    local input="$1"
+    if [ -z "$input" ]; then
+        printf '0'
+        return 0
+    fi
+    # awk's NF counts non-empty fields; per-line NF>0 filters blank lines.
+    # printf "%d" forces a single integer with no trailing newline.
+    printf '%s' "$input" | awk 'NF{c++} END{printf "%d", c+0}'
+}
+
 # Track overall exit status
 EXIT_STATUS=0
 
@@ -104,6 +123,12 @@ fi
 # Track if any files were auto-fixed
 FILES_FIXED=0
 
+# Track whether the non-blocking taste-lints advisory check reported errors.
+# Set to 1 inside the taste-lints branch when TASTE_EXIT == 10. Consumed by
+# the final-summary block to distinguish "blocking checks passed cleanly"
+# from "blocking checks passed but advisory lints found errors". See #2436.
+TASTE_LINTS_ADVISORY=0
+
 # Auto-fix mode (default: enabled)
 AUTOFIX=1
 if [ "${SKIP_AUTOFIX:-}" = "1" ]; then
@@ -135,11 +160,15 @@ cd "$REPO_ROOT"
 #
 IS_MERGE=0
 MERGE_BASE=""
-if [ -f "$REPO_ROOT/.git/MERGE_HEAD" ]; then
+# Resolve MERGE_HEAD via `git rev-parse --git-path` so the check works in
+# linked worktrees (where `$REPO_ROOT/.git` is a file pointing at
+# `<gitdir>/worktrees/<name>`, not a directory). Issue #2376.
+MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || echo "")
+if [ -n "$MERGE_HEAD_PATH" ] && [ -f "$MERGE_HEAD_PATH" ]; then
     IS_MERGE=1
     echo_info "Merge commit detected - validating branch-specific changes only"
     # Get the merge base to identify branch-specific files
-    MERGE_HEAD=$(cat "$REPO_ROOT/.git/MERGE_HEAD")
+    MERGE_HEAD=$(cat "$MERGE_HEAD_PATH")
     MERGE_BASE=$(git merge-base HEAD "$MERGE_HEAD" 2>/dev/null || echo "")
 fi
 
@@ -164,9 +193,10 @@ if [ "$IS_MERGE" = "1" ] && [ -n "$MERGE_BASE" ]; then
             fi
         done <<< "$STAGED_FILES"
 
-        # Count files filtered out
-        ORIGINAL_COUNT=$(echo "$STAGED_FILES" | grep -c . || echo 0)
-        FILTERED_COUNT=$(echo "$FILTERED_STAGED" | grep -c . || echo 0)
+        # Count files filtered out (#2442: use helper to avoid `grep -c .
+        # || echo 0` producing "0\n0" on empty input and breaking $(( ))).
+        ORIGINAL_COUNT=$(count_nonempty_lines "$STAGED_FILES")
+        FILTERED_COUNT=$(count_nonempty_lines "$FILTERED_STAGED")
         SKIPPED_COUNT=$((ORIGINAL_COUNT - FILTERED_COUNT))
 
         if [ "$SKIPPED_COUNT" -gt 0 ]; then
@@ -434,8 +464,15 @@ fi
 # Related: Epic GitHub Actions Local Testing (#848), ADR-005, Skill-CI-001
 #
 
-# Filter for workflow YAML files only
-STAGED_WORKFLOW_FILES=$(echo "$STAGED_FILES" | grep -E '^\.github/(workflows|actions)/.*\.ya?ml$' || true)
+# Filter for workflow YAML files only.
+# actionlint understands workflow YAML under .github/workflows/*.yml and
+# .github/workflows/*.yaml. Composite actions under
+# .github/actions/**/action.yml use a different schema
+# (runs:/inputs:/outputs: at the top level, no jobs:/on:) and feeding them to
+# actionlint produces spurious "missing jobs section" errors (#2346). Composite
+# action SHA-pinning and expression-injection checks run later in this hook and
+# in pre-push.
+STAGED_WORKFLOW_FILES=$(echo "$STAGED_FILES" | grep -E '^\.github/workflows/.*\.ya?ml$' || true)
 
 # Check for SKIP_ACTIONLINT environment variable (emergency bypass)
 if [ "${SKIP_ACTIONLINT:-}" = "1" ]; then
@@ -680,8 +717,9 @@ if [ -n "$STAGED_MCP_FILE" ]; then
         elif [ -f "$MCP_SYNC_SCRIPT" ]; then
             if set_python_cmd; then
                 # Run sync script to sync all targets
-                SYNC_OUTPUT=$("${PYTHON_CMD[@]}" "$MCP_SYNC_SCRIPT" --sync-all --repo-root-override "$REPO_ROOT" 2>&1)
-                SYNC_EXIT=$?
+                # Guard against set -e (Issue #2258): a nonzero sync exit must
+                # be captured, not abort the hook at the substitution.
+                SYNC_OUTPUT=$("${PYTHON_CMD[@]}" "$MCP_SYNC_SCRIPT" --sync-all --repo-root-override "$REPO_ROOT" 2>&1) && SYNC_EXIT=0 || SYNC_EXIT=$?
 
                 if [ $SYNC_EXIT -eq 0 ]; then
                     # Stage generated files if they changed
@@ -741,8 +779,9 @@ if [ -n "$STAGED_AGENT_TEMPLATES" ]; then
         elif [ -f "$GENERATE_AGENTS_SCRIPT" ]; then
             if set_python_cmd; then
                 # Run generator script
-                GENERATE_OUTPUT=$("${PYTHON_CMD[@]}" "$GENERATE_AGENTS_SCRIPT" 2>&1)
-                GENERATE_EXIT=$?
+                # Guard against set -e (Issue #2258): a nonzero generator exit
+                # must be captured, not abort the hook at the substitution.
+                GENERATE_OUTPUT=$("${PYTHON_CMD[@]}" "$GENERATE_AGENTS_SCRIPT" 2>&1) && GENERATE_EXIT=0 || GENERATE_EXIT=$?
 
                 if [ $GENERATE_EXIT -eq 0 ]; then
                     # Stage all generated agent files
@@ -827,9 +866,10 @@ if [ -n "$STAGED_SKILL_FILES" ]; then
                 # Get the skill directory (parent of SKILL.md)
                 skill_dir=$(dirname "$skill_md")
 
-                # Run validator on the skill directory and capture output
-                validator_output=$("${PYTHON_CMD[@]}" "$SKILL_VALIDATOR" "$skill_dir" 2>&1)
-                validator_exit=$?
+                # Run validator on the skill directory and capture output.
+                # Guard against set -e (Issue #2258): the validator exits
+                # nonzero on an invalid skill; capture it, do not abort here.
+                validator_output=$("${PYTHON_CMD[@]}" "$SKILL_VALIDATOR" "$skill_dir" 2>&1) && validator_exit=0 || validator_exit=$?
 
                 # Check if error is a Python system error (not a skill validation error)
                 if echo "$validator_output" | grep -q "failed to join paths"; then
@@ -1249,10 +1289,17 @@ if [ -n "$STAGED_SESSION_LOG" ]; then
             echo_warning "Skipping episode extraction: script path is a symlink"
         elif [ -f "$EPISODE_EXTRACT_SCRIPT" ]; then
             if set_python_cmd; then
-                # Run episode extraction
-                # Guard against set -e aborting the hook on non-blocking extraction failures
-                EXTRACT_OUTPUT=$("${PYTHON_CMD[@]}" "$EPISODE_EXTRACT_SCRIPT" "$STAGED_SESSION_LOG" --force 2>&1 || true)
-                EXTRACT_EXIT=$?
+                # Run episode extraction.
+                # Use --preserve (non-destructive merge) so re-staging a session
+                # log cannot silently overwrite a richer existing episode file.
+                # Refs #2193: previously --force was unconditional, dropping
+                # curated decisions/lessons on every commit that touched a log.
+                # Guard against set -e aborting the hook on non-blocking extraction failures.
+                if EXTRACT_OUTPUT=$("${PYTHON_CMD[@]}" "$EPISODE_EXTRACT_SCRIPT" "$STAGED_SESSION_LOG" --preserve 2>&1); then
+                    EXTRACT_EXIT=0
+                else
+                    EXTRACT_EXIT=$?
+                fi
 
                 if [ $EXTRACT_EXIT -eq 0 ]; then
                     # Extract episode filename from output (last line with .json)
@@ -1276,7 +1323,7 @@ if [ -n "$STAGED_SESSION_LOG" ]; then
                     echo_warning "Episode extraction failed (non-blocking):"
                     echo "$EXTRACT_OUTPUT" | head -5
                     echo_info "  Session log will still be committed."
-                    echo_info "  Extract manually: python3 .claude/skills/memory/scripts/extract_session_episode.py \"$STAGED_SESSION_LOG\" --force"
+                    echo_info "  Extract manually: python3 .claude/skills/memory/scripts/extract_session_episode.py \"$STAGED_SESSION_LOG\" --preserve"
                 fi
             else
                 echo_warning "Python 3 not available. Skipping episode extraction."
@@ -1687,8 +1734,10 @@ if [ -n "$STAGED_MEMORY_FILES" ]; then
                 echo_warning "Memory cross-reference encountered issues (non-blocking)"
                 # Extract and show errors if jq is available
                 if command -v jq &> /dev/null; then
-                    errors=$(echo "$crossref_result" | jq -r '.Errors[]? // empty' 2>/dev/null)
-                    if [ -n "$errors" ]; then
+                    errors=$(echo "$crossref_result" | jq -r '.Errors[]? // empty' 2>/dev/null) && errors_exit=0 || errors_exit=$?
+                    if [ "$errors_exit" -ne 0 ]; then
+                        echo_warning "Could not parse memory cross-reference errors (jq exit $errors_exit)"
+                    elif [ -n "$errors" ]; then
                         echo_info "Errors: $errors"
                     fi
                 fi
@@ -1753,9 +1802,10 @@ if [ -n "$staged_adr_files" ]; then
         echo_warning "Skipping ADR detection: script path is a symlink"
     elif [ -f "$adr_detect_script" ]; then
         if set_python_cmd; then
-            # Run detection and capture output
-            adr_result=$("${PYTHON_CMD[@]}" "$adr_detect_script" --base-path "$REPO_ROOT" 2>&1)
-            adr_exit=$?
+            # Run detection and capture output.
+            # Guard against set -e (Issue #2258): a nonzero detection exit
+            # must be captured, not abort the hook at the substitution.
+            adr_result=$("${PYTHON_CMD[@]}" "$adr_detect_script" --base-path "$REPO_ROOT" 2>&1) && adr_exit=0 || adr_exit=$?
 
             if [ $adr_exit -eq 0 ]; then
                 # Check if changes were detected
@@ -1886,8 +1936,12 @@ if [ "$SKIP_SCOPE_CHECK" != "1" ]; then
         echo_warning "Skipping scope detection: script path is a symlink"
     elif [ -f "$SCOPE_DETECT_SCRIPT" ]; then
         if set_python_cmd; then
-            SCOPE_OUTPUT=$("${PYTHON_CMD[@]}" "$SCOPE_DETECT_SCRIPT" 2>&1)
-            SCOPE_EXIT=$?
+            # Guard against set -e: detect_scope_explosion.py exits 1 when a
+            # commit exceeds the file threshold. Without the `&& x=0 || x=$?`
+            # guard the substitution itself returns 1 under set -e and the hook
+            # dies HERE, before SCOPE_EXIT is captured and before the "Scope
+            # explosion detected" remediation can print (Issue #2258).
+            SCOPE_OUTPUT=$("${PYTHON_CMD[@]}" "$SCOPE_DETECT_SCRIPT" 2>&1) && SCOPE_EXIT=0 || SCOPE_EXIT=$?
             if [ $SCOPE_EXIT -eq 1 ]; then
                 echo ""
                 echo "$SCOPE_OUTPUT"
@@ -1933,7 +1987,11 @@ if [ -n "$STAGED_LINT_FILES" ]; then
                 echo_warning "Taste lint violations detected (non-blocking):"
                 echo "$TASTE_OUTPUT"
                 echo_info "  Consider fixing these issues for cleaner code."
-                # Non-blocking: just warn, don't fail the commit
+                # Non-blocking: just warn, don't fail the commit.
+                # Flag the advisory finding so the final-summary block can
+                # distinguish "blocking pass + advisory clean" from
+                # "blocking pass + advisory errors" (#2436).
+                TASTE_LINTS_ADVISORY=1
             elif [ $TASTE_EXIT -eq 0 ]; then
                 echo_success "Taste lints passed."
             else
@@ -1962,8 +2020,19 @@ if [ $EXIT_STATUS -ne 0 ]; then
     exit 2
 fi
 
+# Final-summary branches, ordered loudest-first (#2436):
+#   1. Auto-fix: working tree was modified, the commit now contains different
+#      bytes than the user staged. This is the strongest user-facing signal.
+#   2. Advisory taste-lints: blocking gates passed (exit 0) but non-blocking
+#      taste-lints reported errors. Pre-fix this was hidden by the
+#      unconditional success line below; agents and humans then missed the
+#      [ERROR] findings printed earlier in the transcript.
+#   3. Clean: every gate (blocking and advisory) was happy.
 if [ "$FILES_FIXED" = "1" ]; then
     echo_success "All checks passed. Some files were auto-fixed and re-staged."
+elif [ "$TASTE_LINTS_ADVISORY" = "1" ]; then
+    echo_success "Blocking pre-commit checks passed; non-blocking taste-lints reported errors."
+    echo_info "  Review the [ERROR] lines above; taste lints are advisory (exit 0)."
 else
     echo_success "All pre-commit checks passed."
 fi

@@ -1,0 +1,106 @@
+# Validate ADR Number Uniqueness (Issue #2253)
+#
+# Catches the concurrent-ADR-PR race where two branches each pick the same
+# "next" ADR number off main. As later PRs merge, earlier branches collide;
+# this gate fails them deterministically at PR time and tells the author
+# the exact next free number to use (via --print-next).
+#
+# Uses dorny/paths-filter (Issue #103): fires on all PRs to satisfy the
+# required-check contract, skips with a passing status when no ADR files
+# changed.
+
+name: Validate ADR Number Uniqueness
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'copilot/**'
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  check-changes:
+    name: Check for ADR Changes
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should-run-adrs: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.adrs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Check path filters
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            adrs:
+              - '.agents/architecture/ADR-*.md'
+              - 'scripts/validation/check_adr_uniqueness.py'
+              - '.github/workflows/validate-adr-number-uniqueness.yml'
+
+  validate-adr-numbers:
+    name: Validate ADR Number Uniqueness
+    needs: check-changes
+    if: needs.check-changes.outputs.should-run-adrs == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 3
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Verify unique ADR numbers
+        run: python3 scripts/validation/check_adr_uniqueness.py
+
+      - name: Show remediation on failure
+        if: failure()
+        run: |
+          printf '%s\n' \
+            "" \
+            "=== ADR Number Uniqueness Validation Failed ===" \
+            "" \
+            "Two ADR files under .agents/architecture/ share the same" \
+            "number. This is the concurrent-PR race described in #2253:" \
+            "your branch picked an ADR number that another PR has since" \
+            "merged to main." \
+            "" \
+            "To fix:" \
+            "  1. Get the next free number:" \
+            "       python3 scripts/validation/check_adr_uniqueness.py --print-next" \
+            "  2. Rename your ADR file to ADR-<new>-<slug>.md" \
+            "  3. Update the '# ADR-NNN:' heading inside the file" \
+            "  4. Sweep references:" \
+            "       git grep -nE 'ADR-<old>\\b' .agents/ .claude/ src/ docs/" \
+            "  5. Re-run the gate locally:" \
+            "       python3 scripts/validation/check_adr_uniqueness.py" \
+            "" \
+            "See issue #2253 for context. In #2228, the incoming ADR" \
+            "files that collided with canonical ADR-058, ADR-062, and" \
+            "ADR-063 were renumbered to ADR-069, ADR-070, and ADR-071;" \
+            "the allowlist is empty and the gate has zero exceptions."
+
+  skip-validation:
+    name: Skip Validation (No ADR Changes)
+    needs: check-changes
+    if: needs.check-changes.outputs.should-run-adrs != 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 1
+    permissions:
+      contents: read
+    steps:
+      - name: Skip message
+        run: |
+          echo "ADR number uniqueness validation skipped - no ADR files changed"

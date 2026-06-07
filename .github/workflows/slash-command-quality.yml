@@ -15,11 +15,11 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
-      should-run: ${{ steps.filter.outputs.commands == 'true' || steps.filter.outputs.validator == 'true' || steps.filter.outputs.spec_evals == 'true' }}
+      should-run-commands: ${{ steps.filter.outputs.commands == 'true' || steps.filter.outputs.validator == 'true' || steps.filter.outputs.spec_evals == 'true' }}
       spec_evals_changed: ${{ steps.filter.outputs.spec_command == 'true' || steps.filter.outputs.spec_evals == 'true' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
 
@@ -42,13 +42,13 @@ jobs:
   validate-slash-commands:
     runs-on: ubuntu-24.04-arm
     needs: check-paths
-    if: needs.check-paths.outputs.should-run == 'true'
+    if: needs.check-paths.outputs.should-run-commands == 'true'
     permissions:
       contents: read
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
 
@@ -76,7 +76,7 @@ jobs:
   skip-validation:
     runs-on: ubuntu-24.04-arm
     needs: check-paths
-    if: needs.check-paths.outputs.should-run != 'true'
+    if: needs.check-paths.outputs.should-run-commands != 'true'
     permissions: {}
     steps:
       - name: Skip validation

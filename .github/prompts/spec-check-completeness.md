@@ -94,8 +94,78 @@ VERDICT: PASS
 
 (or `VERDICT: PARTIAL` / `VERDICT: FAIL`). The CI extractor (`.github/actions/ai-review/action.yml`) anchors on a plain end-of-line `VERDICT: <TOKEN>` pattern; the bolded `> **VERDICT: PASS**` inside the alert block is for human readers and does NOT match the extractor (Refs PR #1965 sed anchor tightening).
 
+## Incremental Scope (fix #2255)
+
+If the additional context contains an `## Incremental Scope Declaration`, the PR
+explicitly delivers only a named slice (e.g. "Phase 2", "PR 1 of 3") of the full
+parent issue. Apply these rules:
+
+1. Mark any acceptance criterion that belongs to a **different** phase or is
+   explicitly outside the declared scope as `N/A`.
+2. Evaluate completeness only over the non-N/A criteria.
+3. A PR that fully satisfies its declared slice with all non-N/A criteria met
+   earns **PASS**, even though other phases remain unimplemented.
+4. Do NOT emit PARTIAL or FAIL because criteria outside the declared scope are
+   unmet. Those are expected to be deferred.
+5. When a criterion is ambiguously scoped, lean toward `N/A` rather than
+   treating it as a gap. The author declared they are not claiming to cover it.
+
+If no `## Incremental Scope Declaration` is present, treat all criteria as
+in-scope and apply the normal verdict guidelines below.
+
+## Ontology Coverage (issue #1925)
+
+The specification may carry a domain ontology. The canonical OntologyFragment lives
+at `.agents/specs/ontology/<feature-slug>.md` (seven `## O1..O7` sections), and each
+`REQ-NNN-{slug}.md` may render an `## Ontology` body section naming the entities it
+touches. When an ontology is present, fold these two checks into the existing
+PASS/PARTIAL/FAIL verdict. Do NOT introduce a new top-level verdict token: the CI
+extractor in `.github/actions/ai-review/action.yml` reads the plain
+`VERDICT: <TOKEN>` line and validates the token against its allowlist. A new
+ontology token would require a coordinated allowlist update; without that change,
+the gate returns `NEEDS_REVIEW` instead of the intended domain verdict.
+
+Run entity coverage and decision-rule traceability only when an OntologyFragment
+exists. A requirement-level `## Ontology` section emitted without a fragment is
+local degraded-run evidence, not a canonical source; record the ontology checks as
+`N/A` and do not lower the verdict for ontology coverage in that case.
+
+1. **Entity coverage**: when an OntologyFragment exists, every domain entity
+   referenced anywhere in generated spec artifacts (`REQ-NNN-{slug}.md`,
+   `DESIGN-NNN-{slug}.md`, and `TASK-NNN-{slug}.md`) must
+   appear in the OntologyFragment by its canonical O2 name. The requirement's `## Ontology`
+   section is evidence that the requirement uses those names; it cannot introduce an
+   entity absent from the fragment. When no OntologyFragment exists, the
+   requirement's `## Ontology` section is local evidence only. An entity named in a
+   requirement but absent from the OntologyFragment is a ubiquitous-language drift:
+   it means two artifacts may name the same concept differently. Treat one such gap
+   as a minor gap (lean PARTIAL); treat a requirement whose primary entity is
+   entirely absent from the OntologyFragment as a critical gap (lean FAIL).
+2. **Decision-rule traceability**: when an OntologyFragment exists, every domain decision rule in
+   `.agents/specs/design/DESIGN-NNN-{slug}.md` should trace to an `## O5`
+   decision-rule source in the OntologyFragment. An unsourced decision rule is a
+   PARTIAL-level gap.
+
+Degradation (no spurious failures):
+
+- If the specification carries NO OntologyFragment, the ontology checks are `N/A`;
+  do not lower the verdict for its absence. Requirement-level `## Ontology` sections
+  from degraded runs are local evidence only, not a substitute fragment.
+- If the OntologyFragment exists but declares `none (no domain entities)` and the
+  generated REQ, DESIGN, and TASK artifacts also reference no domain entities,
+  entity coverage is vacuously satisfied; do not emit PARTIAL or FAIL for an
+  empty-entity feature. If any generated spec artifact names domain entities while
+  the fragment declares none, treat that as a critical entity-coverage gap.
+
+Record ontology findings in the Missing Functionality section, not as a separate
+verdict token.
+
 ## Verdict Guidelines
 
-- `PASS`: All acceptance criteria satisfied, no critical gaps
-- `PARTIAL`: Most criteria satisfied but minor gaps exist
-- `FAIL`: Critical acceptance criteria not satisfied
+- `PASS`: All in-scope acceptance criteria satisfied (N/A criteria excluded) and, when
+  an ontology is present, entity coverage and decision-rule traceability hold (or are
+  vacuously satisfied for an empty-entity feature)
+- `PARTIAL`: Most in-scope criteria satisfied but minor gaps exist, including a single
+  ontology entity-coverage or decision-rule-traceability gap
+- `FAIL`: Critical in-scope acceptance criteria not satisfied, OR a requirement's
+  primary entity is entirely absent from the ontology when an ontology is present

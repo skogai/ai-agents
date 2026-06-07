@@ -25,7 +25,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -36,20 +35,20 @@ sys.path.insert(0, str(REPO_ROOT / "build"))
 
 import generate_hooks  # noqa: E402
 from generate_hooks import (  # noqa: E402
+    _SHIM_BEGIN,
+    _SHIM_END,
     MATCHER_BARE,
     MATCHER_REGEX,
     MATCHER_TOOL_GLOB,
+    _ensure_exact_case_dir,
+    _matcher_suffix,
     classify_matcher,
     glob_or_match,
     inject_shim,
     is_shimmed,
     normalize_tool_args,
     strip_shim,
-    _matcher_suffix,
-    _SHIM_BEGIN,
-    _SHIM_END,
 )
-
 
 # Helpers -------------------------------------------------------------------
 
@@ -117,11 +116,11 @@ artifacts:
     outputConfig: "out/hooks.json"
     outputScripts: "out"
     eventRemap:
-      PreToolUse: preToolUse
-      PostToolUse: postToolUse
-      Stop: sessionEnd
-      SessionStart: sessionStart
-      UserPromptSubmit: userPromptSubmitted
+      PreToolUse: PreToolUse
+      PostToolUse: PostToolUse
+      Stop: SessionEnd
+      SessionStart: SessionStart
+      UserPromptSubmit: UserPromptSubmit
     eventDrop:
       - SubagentStop
       - PermissionRequest
@@ -644,14 +643,30 @@ def test_generator_emits_version_one_wrapper(tmp_path: Path) -> None:
     assert "hooks" in out
 
 
+@pytest.mark.parametrize("yaml_value", ["0", '""', "1.5", "true"])
+def test_generator_fails_2_on_invalid_version_field(
+    tmp_path: Path, yaml_value: str
+) -> None:
+    cfg, _ = _setup_full_fixture(tmp_path)
+    text = cfg.read_text(encoding="utf-8")
+    cfg.write_text(
+        text.replace("    versionField: 1", f"    versionField: {yaml_value}"),
+        encoding="utf-8",
+    )
+
+    rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
+
+    assert rc == 2
+
+
 def test_generator_remaps_event_names(tmp_path: Path) -> None:
     cfg, _ = _setup_full_fixture(tmp_path)
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 0
     out = json.loads((tmp_path / "out" / "hooks.json").read_text())
-    assert "preToolUse" in out["hooks"]
-    assert "postToolUse" in out["hooks"]
-    assert "sessionStart" in out["hooks"]
+    assert "PreToolUse" in out["hooks"]
+    assert "PostToolUse" in out["hooks"]
+    assert "SessionStart" in out["hooks"]
     # SubagentStop dropped.
     assert "SubagentStop" not in out["hooks"]
     assert "subagentStop" not in out["hooks"]
@@ -673,15 +688,29 @@ def test_generator_emits_python3_and_py3_invocation(tmp_path: Path) -> None:
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 0
     out = json.loads((tmp_path / "out" / "hooks.json").read_text())
-    entry = out["hooks"]["preToolUse"][0]
+    entry = out["hooks"]["PreToolUse"][0]
     assert entry["bash"].startswith("python3 -u")
     assert entry["powershell"].startswith("py -3 -u")
     assert entry["cwd"] == "."
 
 
+@pytest.mark.parametrize("timeout_value", [0, "", 1.5, True])
+def test_generator_fails_2_on_invalid_timeout(
+    tmp_path: Path, timeout_value: object
+) -> None:
+    cfg, _ = _setup_full_fixture(tmp_path)
+    settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = timeout_value
+    (tmp_path / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
+
+    assert rc == 2
+
+
 def _find_shimmed_alpha(tmp_path: Path) -> Path:
     """Locate the shimmed copy of alpha.py (suffix encodes the matcher)."""
-    candidates = list((tmp_path / "out" / "preToolUse").glob("alpha*.py"))
+    candidates = list((tmp_path / "out" / "PreToolUse").glob("alpha*.py"))
     assert len(candidates) == 1, f"expected 1 alpha shim, got {candidates}"
     return candidates[0]
 
@@ -755,7 +784,7 @@ def test_generator_distinct_shim_per_matcher(tmp_path: Path) -> None:
     )
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 0
-    targets = sorted((tmp_path / "out" / "preToolUse").glob("guard*.py"))
+    targets = sorted((tmp_path / "out" / "PreToolUse").glob("guard*.py"))
     # Two distinct files, one per matcher.
     assert len(targets) == 2
     body0 = targets[0].read_text()
@@ -764,7 +793,7 @@ def test_generator_distinct_shim_per_matcher(tmp_path: Path) -> None:
     assert ("Matcher: Bash(git commit*)" in body0) != ("Matcher: Bash(git commit*)" in body1)
     # And hooks.json points at both distinct filenames.
     out = json.loads((tmp_path / "out" / "hooks.json").read_text())
-    bash_paths = {entry["bash"] for entry in out["hooks"]["preToolUse"]}
+    bash_paths = {entry["bash"] for entry in out["hooks"]["PreToolUse"]}
     assert len(bash_paths) == 2
 
 
@@ -860,14 +889,14 @@ def test_generator_collision_resistant_filenames(tmp_path: Path) -> None:
     )
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 0
-    targets = sorted((tmp_path / "out" / "postToolUse").glob("guard*.py"))
+    targets = sorted((tmp_path / "out" / "PostToolUse").glob("guard*.py"))
     assert len(targets) == 2, f"expected 2 distinct files, got {targets}"
 
 
 # --- generator config errors (negative) ----------------------------------
 
 
-def test_generator_fails_2_on_missing_eventRemap(tmp_path: Path) -> None:
+def test_generator_fails_2_on_missing_event_remap(tmp_path: Path) -> None:
     cfg = tmp_path / "platform.yaml"
     cfg.write_text(
         """\
@@ -930,6 +959,32 @@ artifacts:
     )
     rc, _ = generate_hooks.generate_hooks(cfg, tmp_path)
     assert rc == 2
+
+
+def test_resolve_script_path_rejects_command_path_traversal(tmp_path: Path) -> None:
+    hooks_src = tmp_path / "hooks_src"
+    _write_script(hooks_src, "PreToolUse", "alpha.py")
+    (tmp_path / "outside.py").write_text("print('outside')\n", encoding="utf-8")
+
+    with pytest.raises(generate_hooks.GenerateHooksError):
+        generate_hooks._resolve_script_path(
+            hooks_src,
+            "python3 -u .claude/hooks/PreToolUse/../../outside.py",
+            "PreToolUse",
+        )
+
+
+def test_resolve_script_path_allows_normalized_internal_path(tmp_path: Path) -> None:
+    hooks_src = tmp_path / "hooks_src"
+    alpha = _write_script(hooks_src, "PreToolUse", "alpha.py")
+
+    resolved = generate_hooks._resolve_script_path(
+        hooks_src,
+        "python3 -u .claude/hooks/PreToolUse/../PreToolUse/alpha.py",
+        "PreToolUse",
+    )
+
+    assert resolved == alpha
 
 
 def test_generator_fails_1_on_missing_settings_file(tmp_path: Path) -> None:
@@ -1058,6 +1113,34 @@ def test_matcher_suffix_whitespace_padded_matcher_normalizes():
     assert a != b
 
 
+def test_ensure_exact_case_dir_uses_collision_free_temp_name(tmp_path: Path) -> None:
+    """A stale case-fix temp directory does not block casing repair."""
+    parent = tmp_path / "hooks"
+    lower_case_dir = parent / "pretooluse"
+    stale_temp_dir = parent / "__case_fix_PreToolUse"
+    lower_case_dir.mkdir(parents=True)
+    stale_temp_dir.mkdir()
+
+    _ensure_exact_case_dir(parent / "PreToolUse")
+
+    entry_names = {entry.name for entry in parent.iterdir()}
+    assert "PreToolUse" in entry_names
+    assert "__case_fix_PreToolUse" in entry_names
+    assert "pretooluse" not in entry_names
+
+
+def test_ensure_exact_case_dir_rejects_file_blocking_target(
+    tmp_path: Path,
+) -> None:
+    """A file at the target name fails loudly instead of being treated as ok."""
+    target = tmp_path / "hooks" / "PreToolUse"
+    target.parent.mkdir()
+    target.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError):
+        _ensure_exact_case_dir(target)
+
+
 # --- live-corpus regression ----------------------------------------------
 
 
@@ -1069,7 +1152,7 @@ def test_live_corpus_every_matcher_classifies(tmp_path: Path) -> None:
     data = json.loads(settings.read_text())
     hooks = data.get("hooks", {})
     seen_kinds: set[str] = set()
-    for event, groups in hooks.items():
+    for _event, groups in hooks.items():
         for group in groups:
             matcher = group.get("matcher")
             if matcher is None:
@@ -1252,18 +1335,16 @@ def test_split_future_imports_only_future_yields_empty_rest() -> None:
 
 
 def test_shim_reads_snake_case_wire_format() -> None:
-    """Shim MUST read ``tool_name``/``tool_input`` from payload, not camelCase.
+    """Shim reads ``tool_name``/``tool_input`` (VS Code-compatible, PascalCase events).
 
-    Claude Code (and Copilot CLI per its hook payload spec) emit snake_case
-    keys. CodeRabbit caught the regression: shim was reading ``toolName``,
-    so every shimmed hook would raise ValueError on real input and exit 2,
-    silently bypassing every gate. Test by pasting a snake_case payload
-    through the shim and asserting normal dispatch.
+    Copilot CLI sends snake_case payloads when event names are PascalCase.
+    Test by pasting a snake_case payload through the shim and asserting
+    normal dispatch.
     """
     body = (
         "import sys, json\n"
         "data = json.load(sys.stdin)\n"
-        'print("OK:" + data["tool_name"])\n'
+        'print("OK:" + data.get("tool_name", data.get("toolName", "")))\n'
     )
     transformed = generate_hooks.inject_shim(body, "Bash(git commit*)")
     payload = {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
@@ -1272,15 +1353,134 @@ def test_shim_reads_snake_case_wire_format() -> None:
     assert proc.stdout.startswith("OK:Bash")
 
 
-def test_shim_rejects_camelcase_payload_with_clear_error() -> None:
-    """A payload with the legacy ``toolName`` key (no ``tool_name``) MUST fail
-    loud with exit 2, not silently allow. This locks the regression: the
-    shim used to ACCEPT camelCase and reject snake_case (the reverse of
-    what real input looks like)."""
+def test_shim_reads_camelcase_wire_format() -> None:
+    """Shim reads ``toolName``/``toolArgs`` (native Copilot, camelCase events).
+
+    Copilot CLI sends camelCase payloads when event names are camelCase.
+    The shim must accept both formats to survive event-name configuration
+    changes without breaking every hook. Fixes issue #2290.
+    """
     transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash")
     proc = _run_shim(transformed, {"toolName": "Bash"})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_shim_camelcase_tool_glob_match() -> None:
+    """Shim matches ``toolArgs`` in tool-glob mode with camelCase payload.
+
+    Copilot CLI sends toolArgs as a JSON *string* (not a parsed object) in
+    camelCase mode. The shim must JSON-parse it before extracting "command"
+    for glob matching. Fixes issue #2290.
+    """
+    transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash(git commit*)")
+    # Real camelCase payload: toolArgs is a JSON string, not a dict
+    proc = _run_shim(transformed, {
+        "toolName": "Bash",
+        "toolArgs": '{"command":"git commit -m x","description":"Commit"}'
+    })
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_shim_replays_canonical_payload_after_camelcase_match() -> None:
+    """A camelCase match replays snake_case fields into the wrapped hook."""
+    body = (
+        "import json, sys\n"
+        "data = json.load(sys.stdin)\n"
+        "tool_input = data.get('tool_input')\n"
+        "if not isinstance(tool_input, dict):\n"
+        "    print('MISSING_TOOL_INPUT')\n"
+        "    sys.exit(2)\n"
+        "print('COMMAND:' + tool_input.get('command', ''))\n"
+    )
+    transformed = generate_hooks.inject_shim(body, "Bash(git commit*)")
+
+    proc = _run_shim(
+        transformed,
+        {
+            "toolName": "Bash",
+            "toolArgs": '{"command":"git commit -m x","description":"Commit"}',
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "COMMAND:git commit -m x" in proc.stdout
+
+
+def test_shim_rejects_payload_missing_both_formats() -> None:
+    """A payload with neither ``tool_name`` nor ``toolName`` MUST fail loud
+    with exit 2. Complements test_inject_shim_exits_2_on_missing_tool_name
+    with the updated error message check."""
+    transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash")
+    proc = _run_shim(transformed, {"foo": "bar"})
     assert proc.returncode == 2
     assert "tool_name" in proc.stderr
+    assert "toolName" in proc.stderr
+
+
+def test_shim_camelcase_tool_glob_non_match() -> None:
+    """camelCase payload where tool matches but args do NOT match the glob.
+
+    The hook must exit 0 (no fire), not crash. Guards against a regression
+    where camelCase payloads always fire regardless of args.
+    """
+    transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash(git commit*)")
+    proc = _run_shim(transformed, {
+        "toolName": "Bash",
+        "toolArgs": '{"command":"git push origin main"}'
+    })
+    assert proc.returncode == 0, proc.stderr
+    # The hook body should NOT have run (no "FIRED" output).
+    assert "FIRED" not in proc.stdout
+
+
+def test_shim_camelcase_malformed_json_toolargs() -> None:
+    """Malformed JSON in toolArgs logs a warning and does not crash.
+
+    The glob match operates on the raw string, which likely does not match
+    a command-oriented pattern. The hook should not fire and not crash.
+    """
+    transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash(git commit*)")
+    proc = _run_shim(transformed, {
+        "toolName": "Bash",
+        "toolArgs": '{"command": "git commit'  # truncated JSON
+    })
+    assert proc.returncode == 0, f"should not crash; stderr={proc.stderr}"
+    assert "toolArgs is not valid JSON" in proc.stderr
+
+
+def test_shim_tool_glob_null_tool_input_falls_back_to_toolargs() -> None:
+    """tool_input present-but-null MUST fall back to toolArgs (issue #2290).
+
+    Regression guard for the asymmetry flagged on PR #2293: the tool_name
+    read uses an explicit ``is None`` check, but tool_args used
+    ``payload.get("tool_input", payload.get("toolArgs"))``. ``dict.get``
+    returns the default only when the key is ABSENT, never when the value
+    is JSON null. A host that sends ``tool_input: null`` alongside a real
+    ``toolArgs`` string would otherwise drop the args, skip the glob match,
+    and silently fail to fire a tool-glob hook (fail-open by omission).
+    """
+    body = 'print("FIRED")\n'
+    transformed = generate_hooks.inject_shim(body, "Bash(git commit*)")
+    proc = _run_shim(
+        transformed,
+        {
+            "tool_name": "Bash",
+            "tool_input": None,
+            "toolArgs": '{"command":"git commit -m x"}',
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "FIRED" in proc.stdout, (
+        "shim dropped toolArgs when tool_input was null; "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+
+
+def test_shim_snake_case_takes_precedence_over_camelcase() -> None:
+    """When both tool_name and toolName are present, snake_case wins."""
+    transformed = generate_hooks.inject_shim("import sys; sys.exit(0)\n", "Bash")
+    proc = _run_shim(transformed, {"tool_name": "Bash", "toolName": "Edit"})
+    assert proc.returncode == 0, proc.stderr  # Bash matched, not Edit
 
 
 def test_all_generated_hooks_parse_as_python() -> None:

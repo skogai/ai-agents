@@ -46,10 +46,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 3
     outputs:
-      should-run: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.sessions }}
+      should-run-protocol: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.sessions }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Check path filters
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
@@ -69,7 +69,7 @@ jobs:
     # ADR-025: ARM runner for cost optimization (37.5% savings vs x64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 3
-    if: needs.check-changes.outputs.should-run == 'true' && github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'
+    if: needs.check-changes.outputs.should-run-protocol == 'true' && github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'
 
     outputs:
       has_sessions: ${{ steps.changed.outputs.has_sessions }}
@@ -96,8 +96,8 @@ jobs:
 
           if [ -z "$ALL_CHANGED" ]; then
             echo "No session files changed"
-            echo "has_sessions=false" >> $GITHUB_OUTPUT
-            echo "session_files=[]" >> $GITHUB_OUTPUT
+            echo "has_sessions=false" >> "$GITHUB_OUTPUT"
+            echo "session_files=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -139,17 +139,17 @@ jobs:
           if [ -z "$CHANGED_FILES" ]; then
             echo ""
             echo "No validatable session files (all historical)"
-            echo "has_sessions=false" >> $GITHUB_OUTPUT
-            echo "session_files=[]" >> $GITHUB_OUTPUT
+            echo "has_sessions=false" >> "$GITHUB_OUTPUT"
+            echo "session_files=[]" >> "$GITHUB_OUTPUT"
           else
             echo ""
             echo "Session files to validate:"
             echo "$CHANGED_FILES"
-            echo "has_sessions=true" >> $GITHUB_OUTPUT
+            echo "has_sessions=true" >> "$GITHUB_OUTPUT"
 
             # Convert to JSON array for matrix
             JSON_ARRAY=$(echo "$CHANGED_FILES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-            echo "session_files=$JSON_ARRAY" >> $GITHUB_OUTPUT
+            echo "session_files=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
           fi
 
 # Validate each session file in parallel using matrix strategy
@@ -209,21 +209,17 @@ jobs:
             $exitCode = $LASTEXITCODE
             $format = 'JSON'
           } else {
-            # Legacy markdown format - migrate to JSON first, then validate
-            Write-Host "Legacy markdown detected - migrating to JSON for validation"
-            $jsonPath = $sessionFile -replace '\.md$', '.json'
-
-            # Migrate
-            & ./scripts/Convert-SessionToJson.ps1 -Path $sessionFile -Force 2>&1 | Out-Null
-
-            if (Test-Path $jsonPath) {
-              $result = & python3 ./scripts/validate_session_json.py $jsonPath 2>&1
-              $exitCode = $LASTEXITCODE
-            } else {
-              $result = @("Migration failed - could not convert markdown to JSON")
-              $exitCode = 1
-            }
-            $format = 'Markdown (legacy)'
+            # Markdown session logs are no longer supported. The session-migration
+            # skill and its PowerShell converter wrapper were sunset in PR #2359
+            # (refs #1946); session-init now emits JSON at creation. Fail fast with
+            # an actionable message instead of running a phantom converter (issue #2384).
+            $result = @(
+              "Markdown session logs are no longer supported.",
+              "session-init now emits JSON; convert this file to JSON or remove it from the PR.",
+              "See PR #2359 and issue #2384 for context."
+            )
+            $exitCode = 1
+            $format = 'Markdown (unsupported)'
           }
           
           # Build markdown output
@@ -315,21 +311,21 @@ jobs:
 
     steps:
       - name: Check if aggregation needed
-        id: should-run
+        id: should-run-protocol
         env:
           HAS_SESSIONS: ${{ needs.detect-changes.outputs.has_sessions }}
         run: |
           if [ "$HAS_SESSIONS" != "true" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Skipped - no session file changes detected"
           fi
 
       - name: Checkout repository
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
 
       - name: Download all validation artifacts
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
         with:
           pattern: validation-*
@@ -337,12 +333,12 @@ jobs:
           merge-multiple: true
 
       - name: Aggregate Verdicts
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         id: aggregate
         run: python3 .github/scripts/aggregate_session_verdicts.py
 
       - name: Generate Compliance Report
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         id: report
         env:
           OVERALL_VERDICT: ${{ steps.aggregate.outputs.final_verdict }}
@@ -353,7 +349,7 @@ jobs:
         run: python3 .github/scripts/generate_session_report.py
 
       - name: Post PR Comment
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -366,7 +362,7 @@ jobs:
             --marker "AI-SESSION-PROTOCOL"
 
       - name: Set Job Summary
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         shell: pwsh -NoProfile -Command "& '{0}'"
         env:
           REPORT_FILE: ${{ steps.report.outputs.report_file }}
@@ -374,7 +370,7 @@ jobs:
           Get-Content $env:REPORT_FILE | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Enforce MUST Requirements
-        if: steps.should-run.outputs.skip != 'true'
+        if: steps.should-run-protocol.outputs.skip != 'true'
         shell: pwsh -NoProfile -Command "& '{0}'"
         env:
           MUST_FAILURES: ${{ steps.aggregate.outputs.must_failures }}
@@ -392,14 +388,14 @@ jobs:
   skip-validation:
     name: Skip Validation (No Session Changes)
     needs: check-changes
-    if: needs.check-changes.outputs.should-run != 'true'
+    if: needs.check-changes.outputs.should-run-protocol != 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 1
     steps:
       - name: Checkout repository
         # Required for dorny/paths-filter pattern consistency
         # See: .serena/memories/ci-infrastructure-dorny-paths-filter-checkout.md
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Skip message
         run: |

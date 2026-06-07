@@ -34,13 +34,48 @@ BOOTSTRAP_ITERATIONS = 10000
 CI_LOWER_PERCENTILE = 2.5
 CI_UPPER_PERCENTILE = 97.5
 # ADR-058 §"halt-due-to-flakiness" outcome / REQ-004 AC-10: methodology
-# halts when more than 30% of fixtures are marked flaky after the
-# contingency rerun. The 0.30 fraction is normative; do not adjust without
+# halts when too many fixtures are marked flaky after the contingency
+# rerun. The 0.30 fraction is normative at large N; do not adjust without
 # an ADR amendment.
 FLAKY_FIXTURE_HALT_FRACTION = 0.30
+# Small-N floor for the halt count. At N=10 the strict "more than 30%"
+# gate halts on 4 flaky fixtures, which is too tight: a couple of flaky
+# fixtures should not invalidate a small corpus. The N-aware count below
+# raises the floor so that small corpora tolerate more flakiness in
+# absolute terms while the 30% gate still governs at large N. See ADR-058
+# (N-aware halt threshold note) and Issue #1878.
+FLAKY_HALT_SMALL_N_FLOOR = 5
 # REQ-004 AC-10: a fixture is flaky when its pass rate disagrees on >=2 of
 # 5 contingency reps for the same (prompt_sha, fixture_set_sha).
 CONTINGENCY_PERSISTENT_THRESHOLD = 2
+HEADLINE_VARIANTS = frozenset({"agent", "baseline"})
+
+
+def _flaky_halt_count(fixture_count: int) -> int:
+    """Minimum flaky-fixture count that halts the methodology.
+
+    N-aware threshold: `max(floor(0.30 * N) + 1, min(5, N // 2))`. The
+    first term is the strict "more than 30%" gate from REQ-004 AC-10 and
+    ADR-058: a flaky share of exactly 30% does NOT halt, only a share
+    strictly greater than 30% does. It governs at large N. The second
+    term is a small-N floor that tolerates a couple of flaky fixtures in a
+    tiny corpus. The methodology halts when the flaky count is greater
+    than or equal to this value.
+
+    The fraction term is computed with integer arithmetic so an exact 30%
+    boundary is handled without float rounding (N=30 -> halt at 10, not 9;
+    N=20 -> 7; N=10 -> 4, but the small-N floor of 5 wins there).
+
+    Worked values: N=2 -> max(1, 1)=1; N=10 -> max(4, 5)=5 (so 4 flaky of
+    10 does NOT halt); N=30 -> max(10, 5)=10 (the strict 30% gate wins).
+    """
+    if fixture_count <= 0:
+        return 0
+    halt_percent = round(FLAKY_FIXTURE_HALT_FRACTION * 100)
+    # Smallest integer strictly greater than 30% of N ("more than 30%").
+    fraction_term = (halt_percent * fixture_count) // 100 + 1
+    floor_term = min(FLAKY_HALT_SMALL_N_FLOOR, fixture_count // 2)
+    return max(fraction_term, floor_term)
 
 
 class EmptyRunError(Exception):
@@ -79,6 +114,11 @@ class AggregateResult:
     error_count: int
     halt_due_to_flakiness: bool
     tokens_estimated: bool = True
+    # True when the flaky count reached the N-aware halt count. When the
+    # aggregator runs in flag-and-continue mode, `halt_due_to_flakiness`
+    # stays False but this flag records that the threshold was crossed, so
+    # the caller can surface the warning without invalidating the run.
+    flaky_halt_threshold_crossed: bool = False
 
 
 def _records_by_fixture_variant(
@@ -88,6 +128,42 @@ def _records_by_fixture_variant(
     for record in records:
         grouped.setdefault((record.fixture_id, record.variant), []).append(record)
     return grouped
+
+
+def _filter_records_by_variant(
+    records: Iterable[RunRecord], variants: frozenset[str]
+) -> list[RunRecord]:
+    return [record for record in records if record.variant in variants]
+
+
+def _require_same_fixture_set(
+    grouped: dict[tuple[str, str], list[RunRecord]], variants: set[str]
+) -> list[str]:
+    by_variant = {
+        variant: {fixture_id for fixture_id, record_variant in grouped if record_variant == variant}
+        for variant in variants
+    }
+    missing_variants = sorted(
+        variant for variant, fixture_ids in by_variant.items() if not fixture_ids
+    )
+    if missing_variants:
+        raise ValueError(
+            f"comparison needs records for variants {sorted(variants)}; "
+            f"missing: {missing_variants}"
+        )
+    reference_variant = sorted(variants)[0]
+    reference_ids = by_variant[reference_variant]
+    mismatched = {
+        variant: sorted(fixture_ids.symmetric_difference(reference_ids))
+        for variant, fixture_ids in by_variant.items()
+        if fixture_ids != reference_ids
+    }
+    if mismatched:
+        raise ValueError(
+            "comparison requires the same fixture set for every variant; "
+            f"mismatched fixture ids: {mismatched}"
+        )
+    return sorted(reference_ids)
 
 
 def _per_run_pass_rate(record: RunRecord) -> float:
@@ -200,18 +276,22 @@ def _percentile(values: list[float], pct: float) -> float:
     return s[lower] + frac * (s[upper] - s[lower])
 
 
-def _paired_bootstrap_ci(
+def pairwise_bootstrap_ci(
     grouped: dict[tuple[str, str], list[RunRecord]],
     fixture_ids: list[str],
+    variant_a: str,
+    variant_b: str,
     *,
     iterations: int = BOOTSTRAP_ITERATIONS,
     rng: random.Random | None = None,
 ) -> tuple[float, float]:
-    """95% paired bootstrap CI on the signed recall delta.
+    """95% paired bootstrap CI on the signed recall delta (variant_a - variant_b).
 
-    Resamples fixture ids with replacement; computes agent and baseline
-    recall on the resample; takes the delta. Returns the [2.5, 97.5]
-    percentile of the resampled deltas.
+    Resamples fixture ids with replacement; computes recall for both variants
+    on the resample; takes the delta. Returns the [2.5, 97.5] percentile of
+    the resampled deltas. Generalizes the agent-vs-baseline CI to any variant
+    pair so the form-factor v2 spike (Issue #1875) can compute the
+    skill-baseline and agent-skill CIs from the same record set.
     """
     if not fixture_ids:
         return (0.0, 0.0)
@@ -220,14 +300,34 @@ def _paired_bootstrap_ci(
     deltas: list[float] = []
     for _ in range(iterations):
         sample = [fixture_ids[rng.randrange(n)] for _ in range(n)]
-        agent_recall = _recall_from_grouped(grouped, "agent", fixture_ids=sample)
-        baseline_recall = _recall_from_grouped(
-            grouped, "baseline", fixture_ids=sample
-        )
-        deltas.append(agent_recall - baseline_recall)
+        recall_a = _recall_from_grouped(grouped, variant_a, fixture_ids=sample)
+        recall_b = _recall_from_grouped(grouped, variant_b, fixture_ids=sample)
+        deltas.append(recall_a - recall_b)
     return (
         _percentile(deltas, CI_LOWER_PERCENTILE),
         _percentile(deltas, CI_UPPER_PERCENTILE),
+    )
+
+
+def _paired_bootstrap_ci(
+    grouped: dict[tuple[str, str], list[RunRecord]],
+    fixture_ids: list[str],
+    *,
+    iterations: int = BOOTSTRAP_ITERATIONS,
+    rng: random.Random | None = None,
+) -> tuple[float, float]:
+    """95% paired bootstrap CI on the agent-vs-baseline recall delta.
+
+    Thin wrapper over `pairwise_bootstrap_ci` for the v1 (ADR-058) headline
+    metric. Kept so the existing aggregate path and its tests do not move.
+    """
+    return pairwise_bootstrap_ci(
+        grouped,
+        fixture_ids,
+        "agent",
+        "baseline",
+        iterations=iterations,
+        rng=rng,
     )
 
 
@@ -262,11 +362,18 @@ class ReportAggregator:
         model_id: str,
         bootstrap_iterations: int = BOOTSTRAP_ITERATIONS,
         rng: random.Random | None = None,
+        flag_only_on_flaky_halt: bool = False,
     ) -> None:
         self._records = records
         self._model_id = model_id
         self._iterations = bootstrap_iterations
         self._rng = rng or random.Random(42)
+        # Flag-and-continue: when True, crossing the N-aware halt count does
+        # not set `halt_due_to_flakiness`. The flaky fixtures are excluded
+        # and the run continues, with `flaky_halt_threshold_crossed` set so
+        # the caller can warn. Default False preserves the hard-halt
+        # behavior the methodology assumes.
+        self._flag_only_on_flaky_halt = flag_only_on_flaky_halt
 
     def aggregate(self) -> AggregateResult:
         if not self._records:
@@ -275,18 +382,28 @@ class ReportAggregator:
                 "RunRecord. Common cause: every triple was skipped on resume "
                 "with no new work performed."
             )
-        grouped = _records_by_fixture_variant(self._records)
+        headline_records = _filter_records_by_variant(self._records, HEADLINE_VARIANTS)
+        if not headline_records:
+            raise EmptyRunError(
+                "no agent or baseline records to aggregate; v1 metrics require "
+                "at least one headline variant record."
+            )
+        grouped = _records_by_fixture_variant(headline_records)
         per_fixture = _per_fixture_pass_rates(grouped)
         flaky_ids = _detect_flaky_fixtures(per_fixture)
         all_fixture_ids = sorted({fid for fid, _ in grouped.keys()})
 
-        # Halt condition: > 30% of fixtures flaky → unstable methodology.
-        halt = (
-            len(all_fixture_ids) > 0
-            and (len(flaky_ids) / len(all_fixture_ids)) > FLAKY_FIXTURE_HALT_FRACTION
-        )
+        # Halt condition: flaky count reaches the N-aware halt count →
+        # unstable methodology. The N-aware count raises the small-N floor
+        # so a tiny corpus is not halted by a couple of flaky fixtures.
+        fixture_count = len(all_fixture_ids)
+        halt_count = _flaky_halt_count(fixture_count) if fixture_count > 0 else 0
+        threshold_crossed = fixture_count > 0 and len(flaky_ids) >= halt_count
+        # Flag-and-continue mode records the crossing but does not halt.
+        halt = threshold_crossed and not self._flag_only_on_flaky_halt
 
-        # Stable subset for delta calculation. When ≤30% flaky, exclude them.
+        # Stable subset for delta calculation. When the run does not halt,
+        # exclude the flaky fixtures and continue on the stable subset.
         excluded = list(flaky_ids) if not halt and flaky_ids else []
         stable_ids = [fid for fid in all_fixture_ids if fid not in set(excluded)]
 
@@ -342,6 +459,159 @@ class ReportAggregator:
             error_count=error_count,
             halt_due_to_flakiness=halt,
             tokens_estimated=tokens_estimated,
+            flaky_halt_threshold_crossed=threshold_crossed,
         )
 
 
+# ---------------------------------------------------------------------------
+# Form-factor comparison (Issue #1875, follow-on to ADR-058).
+#
+# The v1 aggregator answers "does the agent's specialization beat the naive
+# baseline?" (agent - baseline). The form-factor v2 spike adds the `skill`
+# variant and asks two more questions from the SAME record set:
+#   - skill - baseline: did the content help at all, regardless of form?
+#   - agent - skill:     did the agent FORM add value beyond the content?
+# The verdict picks the cheaper form when the form does not measurably help.
+# ---------------------------------------------------------------------------
+
+FormFactorVerdict = str  # {"prefer-skill-form", "prefer-agent-form", "inconclusive"}
+
+
+@dataclass
+class FormFactorComparison:
+    """Three pairwise recall deltas + CIs and a form-factor verdict.
+
+    `agent_skill_ci` is the load-bearing interval: its relation to zero
+    decides the verdict. `skill_tokens` and `agent_tokens` carry the
+    per-variant token totals so the cost-vs-recall trade-off (REQ from Issue
+    #1875 AC: "cost tracking distinguishes per-variant token usage") is
+    visible to the report consumer.
+    """
+
+    agent_recall: float
+    baseline_recall: float
+    skill_recall: float
+    agent_baseline_delta: float
+    skill_baseline_delta: float
+    agent_skill_delta: float
+    agent_baseline_ci: tuple[float, float]
+    skill_baseline_ci: tuple[float, float]
+    agent_skill_ci: tuple[float, float]
+    agent_tokens_in: int
+    agent_tokens_out: int
+    skill_tokens_in: int
+    skill_tokens_out: int
+    verdict: FormFactorVerdict
+    schema_version: int = 1
+
+
+def _tokens_for_variant(
+    records: list[RunRecord], variant: str
+) -> tuple[int, int]:
+    """Sum (tokens_in, tokens_out) across every record for one variant."""
+    tokens_in = sum(r.tokens_in for r in records if r.variant == variant)
+    tokens_out = sum(r.tokens_out for r in records if r.variant == variant)
+    return tokens_in, tokens_out
+
+
+def _form_factor_verdict(
+    agent_skill_delta: float,
+    agent_skill_ci: tuple[float, float],
+    skill_tokens_total: int,
+    agent_tokens_total: int,
+) -> FormFactorVerdict:
+    """Map the agent-skill delta, its CI, and per-variant cost to a verdict.
+
+    Criteria mirror the Issue #1875 normative table:
+      - prefer-agent-form: delta > 0 AND CI lower bound > 0 (the agent form
+        genuinely helps beyond the content).
+      - prefer-skill-form: the CI spans zero (form does not measurably help)
+        AND the skill variant is cheaper. Default to the cheaper form.
+      - inconclusive: the CI spans zero but the skill is not cheaper, so
+        there is no cost reason to prefer either form.
+    The order matters: a genuine agent-form win wins even when skill is
+    cheaper.
+    """
+    ci_low, ci_high = agent_skill_ci
+    if agent_skill_delta > 0 and ci_low > 0:
+        return "prefer-agent-form"
+    if ci_high < 0:
+        return "prefer-skill-form"
+    ci_spans_zero = ci_low <= 0 <= ci_high
+    if ci_spans_zero and skill_tokens_total < agent_tokens_total:
+        return "prefer-skill-form"
+    return "inconclusive"
+
+
+def compute_form_factor(
+    records: list[RunRecord],
+    *,
+    iterations: int = BOOTSTRAP_ITERATIONS,
+    rng: random.Random | None = None,
+    exclude_fixture_ids: set[str] | None = None,
+) -> FormFactorComparison:
+    """Compute the three pairwise CIs and the form-factor verdict.
+
+    Requires records for all three variants (agent, baseline, skill). Raises
+    EmptyRunError on an empty record set and ValueError when the skill
+    variant is absent (the comparison is meaningless without it).
+    """
+    if not records:
+        raise EmptyRunError("compute_form_factor requires at least one record")
+    grouped = _records_by_fixture_variant(records)
+    present = {variant for _, variant in grouped.keys()}
+    missing = {"agent", "baseline", "skill"} - present
+    if missing:
+        raise ValueError(
+            f"form-factor comparison needs agent, baseline, and skill "
+            f"variants; missing: {sorted(missing)}"
+        )
+    fixture_ids = _require_same_fixture_set(grouped, {"agent", "baseline", "skill"})
+    excluded = exclude_fixture_ids or set()
+    fixture_ids = [fixture_id for fixture_id in fixture_ids if fixture_id not in excluded]
+    if not fixture_ids:
+        raise ValueError("form-factor comparison has no stable fixtures to compare")
+
+    agent_recall = _recall_from_grouped(grouped, "agent", fixture_ids=fixture_ids)
+    baseline_recall = _recall_from_grouped(
+        grouped, "baseline", fixture_ids=fixture_ids
+    )
+    skill_recall = _recall_from_grouped(grouped, "skill", fixture_ids=fixture_ids)
+
+    rng = rng or random.Random(42)
+    agent_baseline_ci = pairwise_bootstrap_ci(
+        grouped, fixture_ids, "agent", "baseline", iterations=iterations, rng=rng
+    )
+    skill_baseline_ci = pairwise_bootstrap_ci(
+        grouped, fixture_ids, "skill", "baseline", iterations=iterations, rng=rng
+    )
+    agent_skill_ci = pairwise_bootstrap_ci(
+        grouped, fixture_ids, "agent", "skill", iterations=iterations, rng=rng
+    )
+
+    agent_tokens_in, agent_tokens_out = _tokens_for_variant(records, "agent")
+    skill_tokens_in, skill_tokens_out = _tokens_for_variant(records, "skill")
+
+    verdict = _form_factor_verdict(
+        agent_recall - skill_recall,
+        agent_skill_ci,
+        skill_tokens_in + skill_tokens_out,
+        agent_tokens_in + agent_tokens_out,
+    )
+
+    return FormFactorComparison(
+        agent_recall=agent_recall,
+        baseline_recall=baseline_recall,
+        skill_recall=skill_recall,
+        agent_baseline_delta=agent_recall - baseline_recall,
+        skill_baseline_delta=skill_recall - baseline_recall,
+        agent_skill_delta=agent_recall - skill_recall,
+        agent_baseline_ci=agent_baseline_ci,
+        skill_baseline_ci=skill_baseline_ci,
+        agent_skill_ci=agent_skill_ci,
+        agent_tokens_in=agent_tokens_in,
+        agent_tokens_out=agent_tokens_out,
+        skill_tokens_in=skill_tokens_in,
+        skill_tokens_out=skill_tokens_out,
+        verdict=verdict,
+    )

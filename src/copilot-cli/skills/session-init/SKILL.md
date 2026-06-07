@@ -73,10 +73,6 @@ Use [session-log-fixer](../session-log-fixer/SKILL.md) instead when:
 - An existing session log has validation errors that need repair
 - CI failed with "Session protocol validation failed"
 
-Use [session-migration](../session-migration/SKILL.md) instead when:
-
-- Converting old markdown session logs to JSON format
-
 ## Why This Skill Exists
 
 **Problem**: Every PR starts with malformed session logs that fail CI validation.
@@ -184,6 +180,21 @@ Protocol-Compliant Session Log
 ---
 
 ## Workflow
+
+### Step 0: Issue Coordination Pre-flight (when an issue number is known)
+
+Before creating the session log or a development branch for a specific issue,
+confirm no one else is already working it (issue #2477, competing PRs):
+
+```bash
+# Refuse to open a duplicate if an open PR already addresses the issue
+python3 .claude/skills/github/scripts/issue/check_existing_pr_for_issue.py --issue <N>
+# Refuse to start if another login already holds the issue
+python3 .claude/skills/github/scripts/issue/claim_issue.py --issue <N>
+```
+
+Either script exiting non-zero means STOP: coordinate on the existing claim or PR
+instead of opening a competing one. Skip this step for issue-less sessions.
 
 ### Step 1: Gather Session Information
 

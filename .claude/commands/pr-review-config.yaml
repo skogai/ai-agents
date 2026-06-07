@@ -8,6 +8,16 @@ scripts:
     test_pr_merged: "python3 .claude/skills/github/scripts/pr/test_pr_merged.py --pull-request {number}"
     get_review_threads: "python3 .claude/skills/github/scripts/pr/get_pr_review_threads.py --pull-request {number}"
     get_unresolved_threads: "python3 .claude/skills/github/scripts/pr/get_unresolved_review_threads.py --pull-request {number}"
+    cluster_threads: "python3 .claude/skills/pr-comment-responder/scripts/cluster_threads.py --pull-request {number}"
+    # Settling gate. The one-shot get_unresolved_threads snapshot can read
+    # unresolved_count == 0 in the window between an agent resolving the last
+    # thread and the next bot (Copilot, Devin) scan landing 30-120s later. That
+    # window is exactly the PR #1965 "0 unresolved" lie. wait_for_unresolved_zero
+    # requires THREE consecutive complete-and-zero readings 180s apart before it
+    # exits 0, so a momentarily-true zero between bot scans does not pass. Run it
+    # before the completion gate when the PR has live bot reviewers. No copilot
+    # (PowerShell) equivalent exists; this settling step is Claude-only.
+    wait_for_settled_zero: "python3 .claude/skills/github/scripts/pr/wait_for_unresolved_zero.py --pull-request {number}"
     get_unaddressed_comments: "python3 .claude/skills/github/scripts/pr/get_unaddressed_comments.py --pull-request {number}"
     get_pr_checks: "python3 .claude/skills/github/scripts/pr/get_pr_checks.py --pull-request {number}"
     add_thread_reply: "python3 .claude/skills/github/scripts/pr/add_pr_review_thread_reply.py --thread-id {thread_id} --body {body}"
@@ -18,6 +28,7 @@ scripts:
     test_pr_merged: "pwsh -NoProfile .claude/skills/github/scripts/pr/Test-PRMerged.ps1 -PullRequest {number}"
     get_review_threads: "pwsh -NoProfile .claude/skills/github/scripts/pr/Get-PRReviewThreads.ps1 -PullRequest {number}"
     get_unresolved_threads: "pwsh -NoProfile .claude/skills/github/scripts/pr/Get-UnresolvedReviewThreads.ps1 -PullRequest {number}"
+    cluster_threads: 'pwsh -NoProfile -Command "python3 .claude/skills/pr-comment-responder/scripts/cluster_threads.py --pull-request {number}"'
     get_unaddressed_comments: "pwsh -NoProfile .claude/skills/github/scripts/pr/Get-UnaddressedComments.ps1 -PullRequest {number}"
     get_pr_checks: "pwsh -NoProfile .claude/skills/github/scripts/pr/Get-PRChecks.ps1 -PullRequest {number}"
     add_thread_reply: "pwsh -NoProfile .claude/skills/github/scripts/pr/Post-PRCommentReply.ps1 -PullRequest {number} -ThreadId {thread_id} -Body {body}"
@@ -97,10 +108,15 @@ completion_criteria:
   - name: "PR is ready to merge (CI green, no conflicts)"
     verification: "command"
     command: "python3 .claude/skills/github/scripts/pr/test_pr_merge_ready.py --pull-request {pr}"
-    # NOTE: UnresolvedThreads == 0 is subject to the same security thread
-    # exemption documented above. Security threads with tracking issues do not
-    # block merge readiness.
-    pass_when_python: "lambda d: d.get('CanMerge') == True and d.get('CIPassing') == True and d.get('fetched_pages_complete') == True and d.get('UnresolvedThreads') == 0 and d.get('MergeStateStatus') in ('CLEAN', 'UNSTABLE')"
+    # pr-autofix readiness is a four-condition gate: GitHub says the PR can
+    # merge, required checks pass, review threads are resolved, and the merge
+    # state is CLEAN or UNSTABLE. Keep these fields explicit here so a future
+    # upstream CanMerge regression cannot make this completion gate fail open.
+    #
+    # fetched_pages_complete is a separate data-integrity guard: a truncated
+    # GraphQL page can hide a failing required check, so the gate fails closed
+    # on partial fetches per the PR #1887 retrospective.
+    pass_when_python: "lambda d: d.get('CanMerge') is True and d.get('CIPassing') is True and d.get('fetched_pages_complete') is True and d.get('UnresolvedThreads') == 0 and d.get('MergeStateStatus') in ('CLEAN', 'UNSTABLE')"
     fail_open: false
   - name: "PR is not already merged"
     verification: "command"

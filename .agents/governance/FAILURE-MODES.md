@@ -23,8 +23,9 @@ Trust-based compliance fails at scale. Instructions asking agents to "remember",
 | 6 | Multi-agent rubber-stamping | High | `2025-12-24-parallel-pr-review-session.md` |
 | 7 | Self-contained agent delegation failure | Medium | `2025-12-19-self-contained-agents.md` |
 | 8 | Security drift | Critical | `2026-01-04-pr760-security-suppression-failure.md` |
-| 9 | *Reserved for confident-incorrectness recurrence (see #1919)* | High | `2026-05-08-pr-1897-confident-incorrectness-recurrence.md` |
+| 9 | Confident-incorrectness recurrence | High | `2026-05-08-pr-1897-confident-incorrectness-recurrence.md` |
 | 10 | Silent defaults and guard-clause suppression | High | PR #1965 round-9/round-11 fixes; daniel.haxx.se 2026-05-11 |
+| 11 | Customer-facing generated artifact shipped without runtime verification | Critical | `2026-06-02-pr-2205-customer-wedge-incident.md`; ADR-071 |
 
 ---
 
@@ -280,6 +281,37 @@ See `SECURITY-REVIEW-PROTOCOL.md`, `SECURITY-SEVERITY-CRITERIA.md`, and ADR-023 
 
 ---
 
+## 9. Confident-Incorrectness Recurrence
+
+### Description
+
+An agent reaches a conclusion from partial signal, delivers it with full confidence, and the gap surfaces only after multiple rounds of correction. The shape is: partial signal, premature conclusion, confident delivery, multi-round correction. The most damaging variant is shipping a rule, guard, or validator that is meant to prevent a failure mode while exhibiting that same failure mode in the act of shipping it (designing the artifact against an imagined contract rather than the canonical source).
+
+### Trigger
+
+A change asserts that it "matches", "mirrors", or "aligns with" an existing source (a regex, schema, exit-code table, or wire contract) without quoting that source verbatim. The author models the contract from memory instead of reading it. Confidence is high and unwarranted; the first reviewer trusts the claim.
+
+### Evidence
+
+- `2026-05-05-pr-1887-iteration-paradox.md`: PR #1887 enforced a 20-character evidence minimum that does not exist in the canonical `scripts/validate_session_json.py:CONTRADICTION_PATTERNS`. Re-pointing M4 at the real contract took 7 fix commits.
+- `2026-05-08-pr-1897-confident-incorrectness-recurrence.md`: the same partial-signal-to-confident-delivery shape recurred on a rule-shipping PR.
+
+### Detection
+
+- A docstring or comment claims parity with another file but does not quote it, or paraphrases it in prose that can drift.
+- A guard or validator is stricter or looser than its canonical counterpart with no documented divergence.
+- A PR corrects the same conceptual mistake across three or more commits.
+
+### Enforcement Pattern
+
+- A first commit that claims to "match"/"mirror" a source MUST cite the path verbatim and quote the load-bearing contract fragment character-for-character; intentional divergence is named in a divergence section. See `.claude/rules/canonical-source-mirror.md`.
+- Reviewers open the cited canonical source and confirm the quote before approving.
+- When first-principles reasoning contradicts a documented contract, log the decision (Serena memory or a code comment) rather than ship the contradiction silently.
+
+See `.claude/rules/canonical-source-mirror.md`, the two retrospectives above, and Issue #1919.
+
+---
+
 ## 10. Silent Defaults and Guard-Clause Suppression
 
 ### Description
@@ -366,6 +398,84 @@ FM-4 (False Completion Markers) describes the *output*: an agent claims a task i
 - Issue #1992 (re-spec M1 stable-zero wrapper, `len(threads)` ad-hoc parsing pattern)
 - Issue #1919 (FM-9 confident-incorrectness; adjacent failure mode, separate root cause)
 - daniel.haxx.se 2026-05-11 "Mythos finds a curl vulnerability"; section "How AI Analyzers Differ from Traditional Tools" cites comment-vs-code drift detection
+
+---
+
+## 11. Customer-Facing Generated Artifact Shipped Without Runtime Verification
+
+### Description
+
+A generator produces an artifact that is installed into a customer's environment
+(plugin `hooks.json`, copied hook scripts, agent or skill files a CLI loads, MCP
+config). Tests validate the artifact's structure only. No gate ever executes the
+artifact under the runtime contract of its target host (the working directory the
+host sets, the environment variables it exports, the process model). The artifact
+ships structurally valid and behaviorally broken. The most damaging variant wedges
+the customer's environment: a hook whose launcher fails (wrong path, interpreter
+not on PATH) errors before any in-script fail-open handler runs, so the host has
+no working path and the only recovery is uninstalling the plugin.
+
+This is distinct from FM #9 (confident-incorrectness), which describes the
+author's unverified confidence. FM #11 describes the pipeline gap: even a careful
+author ships broken artifacts when the release path has no runtime-contract gate.
+It is distinct from FM #4 (false completion) because the structural tests are
+genuinely green; nobody narrated a false claim. Falsifiable distinguisher: if the
+structural tests pass honestly AND no false completion claim was narrated, the
+incident is FM #11 even when FM #9 (author overconfidence) is absent. A careful,
+honest author still ships a wedge when the release path has no runtime gate.
+
+### Trigger
+
+- A generator emits a customer-facing artifact whose correctness depends on a
+  runtime contract that is undocumented or assumed by analogy.
+- The test suite asserts the artifact's shape (valid JSON, fields present) or
+  asserts the generator's own output (self-referential), but never runs the
+  artifact under the host's real cwd and environment.
+- No validator gates the committed artifact; no smoke test installs it into the
+  target CLI.
+
+### Evidence
+
+- `2026-06-02-pr-2205-customer-wedge-incident.md`: the Copilot plugin shipped
+  `hooks.json` with bare `./hooks/...` command paths and `cwd: "."`. Copilot CLI
+  runs hooks with cwd = the user's working directory, so every hook failed at
+  launch ("No such file or directory"), before the in-script fail-open shim. It
+  shipped 33 days across versions 0.3.0 to 0.5.6. Customers had to uninstall to
+  recover. The first fix (PR #2205) repeated the pattern: an assumed env var name
+  and a self-referential string-match test that passed while the artifact was
+  broken.
+
+### Detection
+
+- A generated artifact installed into a customer environment has no test that
+  executes it from a non-host-root cwd with the host's environment.
+- A regression test asserts the generator's literal output rather than running it.
+- The committed artifact (not just the generator on a fixture) is ungated.
+- Blast-radius question unanswered: "if this artifact is wrong, does the customer
+  get a degraded feature or a wedged environment?"
+
+### Enforcement Pattern
+
+| Gate | Mechanism | Blocking |
+|------|-----------|----------|
+| Runtime contract | Verify by running the target tool; record version (`decision-copilot-cli-hook-plugin-root-contract`) | Pre-merge |
+| Runtime-contract test | `tests/build_scripts/test_generate_hooks_runtime_contract.py` executes the command under the real cwd/env with a negative control | CI (pytest) |
+| Committed-artifact gate | `scripts/validation/validate_hook_anchoring.py` in `pre_pr.py`; derives expected shape from the generator | Pre-PR |
+| Real-CLI smoke | `tests/e2e/test_cli_hook_e2e.py` forced in `.githooks/pre-push` on hook-path changes; skips loudly without a CLI | Pre-push (local) |
+
+The principle: **a customer-facing generated artifact MUST be executed in its
+target runtime before release.** Structural validity is not behavioral evidence.
+Self-referential tests do not count. Where the runtime needs auth that bare CI
+lacks, force the smoke locally and document a release or nightly smoke; a skipped
+smoke MUST be loud.
+
+### References
+
+- `.agents/retrospective/2026-06-02-pr-2205-customer-wedge-incident.md`
+- ADR-071 (plugin hook runtime-contract verification)
+- `.claude/rules/generated-artifacts.md`
+- `.claude/rules/canonical-source-mirror.md` (self-referential test anti-pattern)
+- Issues #2205 (fix), #2223 (follow-up debt)
 
 ---
 

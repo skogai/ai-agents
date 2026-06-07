@@ -43,7 +43,19 @@ class TestValidOutput:
         assert errors == []
 
     def test_all_agents_accepted(self) -> None:
-        for agent in ("security", "qa", "analyst", "architect", "devops", "roadmap"):
+        for agent in (
+            "security",
+            "qa",
+            "analyst",
+            "architect",
+            "devops",
+            "roadmap",
+            "reliability",
+            "observability",
+            "agent-safety",
+            "decision-rigor",
+            "code-quality",
+        ):
             errors = validate_output(_valid_output(agent=agent))
             assert errors == [], f"Agent '{agent}' rejected"
 

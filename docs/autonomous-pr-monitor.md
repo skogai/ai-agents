@@ -58,7 +58,7 @@ A PR is ready to merge ONLY when ALL of the following hold:
 1. **Branch up to date with `main`**. `mergeStateStatus != BEHIND`. If behind, merge `main` into the branch (or rebase) and push before landing. `CanMerge=True` from `test_pr_merge_ready.py` is not sufficient when the GitHub `mergeStateStatus` is `BLOCKED` or `BEHIND`.
 2. **All required checks pass**. Each required check's latest run is `SUCCESS`. The canonical signal is `test_pr_merge_ready.py`'s `CIPassing == true`, which collapses each check name to its latest run state and ignores superseded `CANCELLED` runs when a later `SUCCESS` exists. A `FAILURE` or `PENDING` on the latest run still blocks; a stale `CANCELLED` on an older run does not.
 3. **All conversations addressed end-to-end**. For every currently UNRESOLVED thread, the agent must walk the 5-step lifecycle below (READ, TRIAGE, SOLVE if Blocking, REPLY, RESOLVE). Threads already RESOLVED before the session started require only READ and TRIAGE to confirm the resolution still matches the current diff; SOLVE, REPLY, and RESOLVE do not apply when there is nothing to act on. A reply without resolution leaves the thread open. A resolution without a reply leaves the reviewer without explanation.
-4. **`mergeStateStatus == CLEAN`** (or `UNSTABLE` if non-required checks are failing and have been documented). `BLOCKED`, `BEHIND`, `DIRTY`, `DRAFT`, and `UNKNOWN` are not landable.
+4. **`mergeStateStatus == CLEAN`** (or `UNSTABLE` if non-required checks are failing and have been documented). `BLOCKED`, `BEHIND`, `DIRTY`, `DRAFT`, and `UNKNOWN` are not landable. **Auto-merge** (`set_pr_auto_merge.py --enable`) is only appropriate when GitHub still has branch-protection work to wait on. GitHub refuses auto-merge for `UNSTABLE` PRs (issue #2439) and may reject an already-`CLEAN` PR because there is nothing left to wait on (issue #2450). For documented-`UNSTABLE` PRs, or an already-`CLEAN` rejection, use direct merge (`merge_pr.py --strategy squash`) after all four conditions pass.
 
 `CanMerge` from `test_pr_merge_ready.py` is a partial signal. Always cross-check against the four conditions above before enabling auto-merge or merging directly.
 
@@ -70,11 +70,40 @@ Use `test_pr_merge_ready.py` to collect merge readiness data for each PR. Then a
 
 | Tier | Criteria | Action |
 |------|----------|--------|
-| T1 | Branch up to date, no CI failures, no unresolved threads, `CLEAN` merge state | Land immediately (enable auto-merge) |
+| T1 | Branch up to date, no CI failures, no unresolved threads, `CLEAN` merge state | Land through the CLEAN merge path after the four-condition gate |
 | T2 | CI failures only (no threads), branch up to date | Fix CI, verify all required checks pass, then land |
 | T3 | Threads only (CI passing) | Triage every thread, solve blockers, reply with course of action, resolve all threads, then land |
 | T4 | Both CI failures and unresolved threads | Fix CI first, then walk Thread Severity lifecycle for every thread |
 | T5 | Bot PR with validation failures | See Renovate PR Handling section |
+
+### Per-PR Live-State Re-Triage (BLOCKING, issue #2455)
+
+The triage above produces a session-start snapshot. In a repo with heavy merge automation, that snapshot decays fast: PRs merge or close mid-walk; sibling consolidated PRs land the same diff on `main`, making queued rows redundant. Acting on a stale row wastes work and risks pushing duplicate or conflicting logic.
+
+Before any per-tier action on each PR (arming auto-merge, pushing a CI fix, posting a thread reply), call the live-state gate and branch on the JSON envelope `Data.action` field:
+
+```bash
+# One outer fetch covers all per-PR calls; --skip-fetch keeps the loop cheap.
+git fetch --quiet origin "+refs/heads/main:refs/remotes/origin/main"
+
+# Per PR, immediately before the tier's planned action:
+LIVE=$(python3 .claude/skills/github/scripts/pr/check_pr_live_state.py \
+    --pull-request "$PR" --skip-fetch --output-format json)
+ACTION=$(echo "$LIVE" | jq -r '.Data.action')
+if [ "$ACTION" = "SKIP" ]; then
+    echo "Skipping #$PR: $(echo "$LIVE" | jq -r '.Data.reason')"
+    # If Data.superseded_by_base.fully_superseded == true, recommend close
+    # via the queue's close-handling path; do NOT push or merge.
+    continue
+fi
+```
+
+The gate checks two failure modes:
+
+1. **Live state drift.** The PR is now MERGED, CLOSED, or a DRAFT. Anything other than OPEN means do not act.
+2. **Superseded by base.** `git cherry origin/<base> origin/<head>` reports every commit on the PR branch as already on `origin/<base>` (patch-id match). This is the "diff already landed via a sibling PR" case (PR #2394 vs PRs #2409/#2412 on 2026-06-05; #2409 was auto-merge-armed before redundancy was caught).
+
+SKIP verdicts are binding: do NOT push commits, do NOT arm auto-merge, do NOT run `merge_pr.py` on a PR this gate classifies as SKIP. The verdict's `reason` field names the cause for the autofix log. An `ACT` verdict only proves the PR is still actionable; the four-condition Ready-to-Merge gate above still applies before any merge.
 
 If `mergeStateStatus == BEHIND`, the PR's branch must be updated against `main` BEFORE landing, regardless of tier. Update via merge or rebase; do not rely on auto-merge to handle the update.
 
@@ -177,7 +206,7 @@ Review the list and identify ANY memories that could be even tangentially releva
 
 ### Step 3: Read Relevant Memories
 
-Call `mcp__serena__read_memory` for each potentially relevant memory you identified. Do not hesitate to read multiple memories—your goal is to be as informed as possible.
+Call `mcp__serena__read_memory` for each potentially relevant memory you identified. Do not hesitate to read multiple memories: your goal is to be as informed as possible.
 
 ### Step 4: Synthesize and Incorporate
 
@@ -233,7 +262,7 @@ Commit all changes including files in the `.agents/` directory.
 
 ## Required Analysis Process
 
-Before providing your final response, work through your analysis inside a thinking block in `<session_analysis>` tags. This section can be quite long—thoroughness is more important than brevity. It's OK for this section to be quite long. Structure your analysis with these sections:
+Before providing your final response, work through your analysis inside a thinking block in `<session_analysis>` tags. This section can be quite long: thoroughness is more important than brevity. It's OK for this section to be quite long. Structure your analysis with these sections:
 
 ### 1. Session State Determination
 
@@ -259,7 +288,7 @@ After initialization (or immediately if not a new session), plan the PR review w
 
 ### 3. Memory Inventory
 
-After calling `mcp__serena__list_memories`, write down every single memory key that was returned. List them all out, one by one. This section can be quite long—a comprehensive memory inventory may include dozens of keys, and you should list every single one. Do not skip any memory keys.
+After calling `mcp__serena__list_memories`, write down every single memory key that was returned. List them all out, one by one. This section can be quite long: a comprehensive memory inventory may include dozens of keys, and you should list every single one. Do not skip any memory keys.
 
 ### 4. Memory Relevance Evaluation
 
@@ -268,7 +297,7 @@ Go through your list of memories systematically, evaluating each one individuall
 - Explain why it's relevant or not relevant (even a brief explanation)
 - Mark which ones you'll read with `mcp__serena__read_memory`
 
-Work through each memory one by one. Be liberal in your assessment—when in doubt, mark it as worth reading.
+Work through each memory one by one. Be liberal in your assessment: when in doubt, mark it as worth reading.
 
 ### 5. Technical Pattern Analysis (IMPORTANT)
 
@@ -608,6 +637,46 @@ done
 
 Do not attempt to land PRs while `mergeable` is `UNKNOWN`. Resolve status first, then proceed with tiering. If status remains stale after retry, enable auto-merge and let GitHub handle it when checks pass.
 
+### Stale merge-state cache
+
+GitHub can also keep a PR in `mergeable == "CONFLICTING"` or `mergeStateStatus == "DIRTY"` after the base branch advanced, even when the branch is already an ancestor of the base and a local merge is clean. Observed on PR #2334 (issue #2368): the agent verified locally that `origin/main` was an ancestor of the PR head and a local merge was clean, yet GitHub still reported the conflict. A safe base-ref refresh cleared the stale cache and the PR merged.
+
+`test_pr_merge_ready.py` surfaces this with the `StaleDirtySuspected` output field. It is `true` whenever GitHub reports `mergeable == "CONFLICTING"` or `mergeStateStatus == "DIRTY"`. It is an ADVISORY flag only: it does not relax `CanMerge`. The script is a pure GitHub-API probe with no working tree, so it cannot run the ancestry check itself. Confirm against local git before acting.
+
+Distinguish stale cache from a real conflict before any refresh:
+
+```bash
+PR=2334
+BRANCH="$(python3 .claude/skills/github/scripts/pr/get_pr_context.py --pull-request "$PR" | jq -r .Data.head_branch)"
+BASE="$(python3 .claude/skills/github/scripts/pr/get_pr_context.py --pull-request "$PR" | jq -r .Data.base_branch)"
+WT=".worktrees/pr-$PR"
+git worktree add "$WT" "$BRANCH"
+git -C "$WT" fetch origin "$BASE"
+
+# Stale-cache signal: base is already an ancestor of HEAD (exit 0) AND a trial
+# merge is clean. A real conflict makes the trial merge fail (non-zero).
+if git -C "$WT" merge-base --is-ancestor "origin/$BASE" HEAD; then
+  echo "base is an ancestor; stale cache suspected"
+fi
+git -C "$WT" merge --no-commit --no-ff "origin/$BASE"   # clean? then stale. conflict? then real.
+git -C "$WT" merge --abort 2>/dev/null || true
+```
+
+Outcomes:
+
+- **Base is an ancestor AND trial merge is clean**: `mergeable == "CONFLICTING"` or `mergeStateStatus == "DIRTY"` is stale. Issue a safe base-ref refresh (below). Do not treat the PR as permanently blocked.
+- **Trial merge reports conflicts**: the conflict is real and authoritative. Resolve it via the merge-resolver skill; do not refresh-and-hope. `StaleDirtySuspected` being `true` does not override a failing trial merge.
+
+Safe base-ref refresh (no force; runs the same merge as the Branch Update path, which is a no-op when already an ancestor and harmless otherwise):
+
+```bash
+git -C "$WT" merge origin/"$BASE" --no-edit   # no-op when already an ancestor
+git -C "$WT" push origin "$BRANCH"            # fast-forward-friendly; no --force
+git worktree remove --force "$WT"
+```
+
+Run the Force-Push Safety pre-push audit (verify the local tip matches the PR head SHA) before the push, then re-run the completion gate. After the push, GitHub recomputes mergeability from the fresh ref and clears the stale cache.
+
 ## Branch Update Against Main
 
 If `mergeStateStatus == BEHIND` (or `BLOCKED` with no other obvious cause), the branch must be updated against `main` before the PR can land. Repos with linear-history requirements will not allow squash-merge to bypass this.
@@ -682,10 +751,10 @@ python3 .claude/skills/github/scripts/pr/get_pr_check_logs.py --owner {owner} --
 # Get unresolved review threads
 python3 .claude/skills/github/scripts/pr/get_unresolved_review_threads.py --owner {owner} --repo {repo} --pull-request {number}
 
-# Merge a PR
+# Merge a PR (direct merge: use for UNSTABLE with documented non-required failures, or any CLEAN PR you want merged immediately)
 python3 .claude/skills/github/scripts/pr/merge_pr.py --owner {owner} --repo {repo} --pull-request {number}
 
-# Enable auto-merge
+# Enable auto-merge (CLEAN state only; GitHub refuses UNSTABLE per issue #2439)
 python3 .claude/skills/github/scripts/pr/set_pr_auto_merge.py --owner {owner} --repo {repo} --pull-request {number}
 
 # Find notifications needing attention

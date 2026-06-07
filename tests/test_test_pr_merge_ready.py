@@ -35,6 +35,72 @@ _mod = _import_script("test_pr_merge_ready")
 main = _mod.main
 build_parser = _mod.build_parser
 check_merge_readiness = _mod.check_merge_readiness
+stale_dirty_suspected = _mod.stale_dirty_suspected
+
+
+class TestScriptCommit:
+    """Issue #2443: the readiness verdict carries the producing script's commit."""
+
+    def test_returns_git_sha_from_relative_pathspec(self):
+        script_path = "/repo/.claude/skills/github/scripts/pr/test_pr_merge_ready.py"
+        completed = [
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="/repo\n", stderr=""),
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="", stderr=""),
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="abc1234\n", stderr=""),
+        ]
+
+        with (
+            patch.object(_mod, "__file__", script_path),
+            patch.object(_mod.subprocess, "run", side_effect=completed) as run,
+        ):
+            assert _mod._script_commit() == "abc1234"
+
+        log_call = run.call_args_list[2]
+        assert log_call.args[0][-1] == ".claude/skills/github/scripts/pr/test_pr_merge_ready.py"
+        assert not Path(log_call.args[0][-1]).is_absolute()
+        assert log_call.kwargs["encoding"] == "utf-8"
+        assert log_call.kwargs["errors"] == "replace"
+        assert log_call.kwargs["env"]["LC_ALL"] == "C"
+
+    def test_unknown_when_script_has_uncommitted_changes(self):
+        script_path = "/repo/.claude/skills/github/scripts/pr/test_pr_merge_ready.py"
+        completed = [
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="/repo\n", stderr=""),
+            _mod.subprocess.CompletedProcess(
+                ["git"],
+                0,
+                stdout=" M .claude/skills/github/scripts/pr/test_pr_merge_ready.py\n",
+                stderr="",
+            ),
+        ]
+
+        with (
+            patch.object(_mod, "__file__", script_path),
+            patch.object(_mod.subprocess, "run", side_effect=completed) as run,
+        ):
+            assert _mod._script_commit() == "unknown"
+
+        assert len(run.call_args_list) == 2
+
+    def test_unknown_when_git_unavailable(self):
+        with patch.object(_mod.subprocess, "run", side_effect=OSError("no git")):
+            assert _mod._script_commit() == "unknown"
+
+    def test_unknown_when_output_blank(self):
+        completed = [
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="/repo\n", stderr=""),
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="", stderr=""),
+            _mod.subprocess.CompletedProcess(["git"], 0, stdout="\n", stderr=""),
+        ]
+
+        with (
+            patch.object(
+                _mod, "__file__",
+                "/repo/.claude/skills/github/scripts/pr/test_pr_merge_ready.py",
+            ),
+            patch.object(_mod.subprocess, "run", side_effect=completed),
+        ):
+            assert _mod._script_commit() == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +205,59 @@ class TestCheckMergeReadiness:
         assert result["MergeStateStatus"] == "BEHIND"
         assert any("behind" in r.lower() for r in result["Reasons"])
 
-    def test_blocked_state_still_ready(self):
-        # issue #2157: BLOCKED usually means "awaiting required review", which
-        # is exactly when enabling auto-merge is correct. It must NOT block
-        # CanMerge; it is surfaced via MergeStateStatus for the agent.
+    def test_blocked_state_blocks_by_default(self):
+        # issue #2326 (supersedes the prior #2157 BLOCKED-is-ready behavior):
+        # BLOCKED means GitHub's branch protection still refuses the merge
+        # (missing review decision / unmet protection rule). Treating it as
+        # ready produced a false ready signal observed on PR #2323 and
+        # contradicted the repo's own four-condition merge gate. BLOCKED must
+        # make CanMerge False by default, with the blocker named in Reasons,
+        # while MergeStateStatus still surfaces the state for the agent.
         pr_data = json.loads(json.dumps(_OPEN_PR))
         pr_data["repository"]["pullRequest"]["mergeStateStatus"] = "BLOCKED"
         with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
             result = check_merge_readiness("o", "r", 42)
-        assert result["CanMerge"] is True
+        assert result["CanMerge"] is False
         assert result["MergeStateStatus"] == "BLOCKED"
+        assert any("blocked" in r.lower() for r in result["Reasons"]), (
+            f"a BLOCKED merge state must name the blocker; reasons: "
+            f"{result['Reasons']}"
+        )
+        assert any(
+            "branch protection" in r.lower() or "review" in r.lower()
+            for r in result["Reasons"]
+        ), (
+            "blocker reason should name branch protection / missing review "
+            f"decision; reasons: {result['Reasons']}"
+        )
+
+    def test_blocked_state_no_other_blockers_still_blocks(self):
+        # The exact PR #2323 shape: OPEN, not draft, 0 unresolved threads,
+        # 0 failing checks, 0 pending checks, but mergeStateStatus=BLOCKED.
+        # Every other gate is clean, so without this fix CanMerge would be
+        # True (the false ready signal #2326 reports). With the fix, the
+        # only reason is the BLOCKED merge state.
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        pr_data["repository"]["pullRequest"]["mergeStateStatus"] = "BLOCKED"
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+        assert result["CanMerge"] is False
+        assert result["UnresolvedThreads"] == 0
+        assert result["FailedRequiredChecks"] == []
+        assert result["PendingRequiredChecks"] == []
+        assert result["CIPassing"] is True
+        assert len(result["Reasons"]) == 1, (
+            "BLOCKED should be the sole blocker on an otherwise-clean PR; "
+            f"reasons: {result['Reasons']}"
+        )
+
+    def test_null_merge_state_status_normalizes_to_empty_string(self):
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        pr_data["repository"]["pullRequest"]["mergeStateStatus"] = None
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+        assert result["CanMerge"] is True
+        assert result["MergeStateStatus"] == ""
         assert result["Reasons"] == []
 
     def test_unresolved_threads(self):
@@ -774,3 +883,59 @@ class TestFetchedPagesCompleteFlag:
         assert result["CIPassing"] is False
         assert "ci" in result["FailedRequiredChecks"]
         assert result["CanMerge"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: stale_dirty_suspected (issue #2368)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleDirtySuspected:
+    @pytest.mark.parametrize(
+        ("mergeable", "merge_state_status"),
+        [
+            ("CONFLICTING", "DIRTY"),       # both signals present
+            ("CONFLICTING", "CLEAN"),       # mergeable signal alone
+            ("MERGEABLE", "DIRTY"),         # state signal alone
+        ],
+    )
+    def test_flags_dirty_or_conflicting(self, mergeable, merge_state_status):
+        assert stale_dirty_suspected(mergeable, merge_state_status) is True
+
+    @pytest.mark.parametrize(
+        ("mergeable", "merge_state_status"),
+        [
+            ("MERGEABLE", "CLEAN"),         # the clean baseline
+            ("MERGEABLE", "BLOCKED"),       # awaiting review, not a conflict
+            ("MERGEABLE", "BEHIND"),        # behind != dirty; BEHIND has its own gate
+            ("UNKNOWN", "UNKNOWN"),         # still computing, not yet a conflict
+            ("", ""),                       # missing fields default to not-suspected
+        ],
+    )
+    def test_does_not_flag_non_conflict_states(self, mergeable, merge_state_status):
+        assert stale_dirty_suspected(mergeable, merge_state_status) is False
+
+
+class TestStaleDirtyInMergeReadiness:
+    def test_conflicting_sets_advisory_flag(self):
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        pr_data["repository"]["pullRequest"]["mergeable"] = "CONFLICTING"
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+        assert result["StaleDirtySuspected"] is True
+
+    def test_advisory_does_not_relax_can_merge(self):
+        # The advisory is informational only. A CONFLICTING PR must still be
+        # blocked; the caller verifies against local git before any refresh.
+        pr_data = json.loads(json.dumps(_OPEN_PR))
+        pr_data["repository"]["pullRequest"]["mergeable"] = "CONFLICTING"
+        with patch("test_pr_merge_ready.gh_graphql", return_value=pr_data):
+            result = check_merge_readiness("o", "r", 42)
+        assert result["StaleDirtySuspected"] is True
+        assert result["CanMerge"] is False
+
+    def test_clean_pr_does_not_set_advisory_flag(self):
+        with patch("test_pr_merge_ready.gh_graphql", return_value=_OPEN_PR):
+            result = check_merge_readiness("o", "r", 42)
+        assert result["StaleDirtySuspected"] is False
+        assert result["CanMerge"] is True

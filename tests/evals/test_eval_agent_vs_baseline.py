@@ -90,6 +90,7 @@ RunDirectoryNotFreshError = persistence_mod.RunDirectoryNotFreshError
 ReportAggregator = aggregator_mod.ReportAggregator
 AggregateResult = aggregator_mod.AggregateResult
 EmptyRunError = aggregator_mod.EmptyRunError
+_flaky_halt_count = aggregator_mod._flaky_halt_count
 ReportWriter = writer_mod.ReportWriter
 
 FixtureValidator = cli_mod.FixtureValidator
@@ -1308,7 +1309,7 @@ class TestReportAggregatorRecall:
         assert result.error_count == 1
 
     def test_recall_uses_assertion_count_not_fixture_count(self):
-        # One fixture, two assertions on the same response — recall denom
+        # One fixture, two assertions on the same response: recall denom
         # MUST be the assertion count (2), not the fixture count (1).
         record = RunRecord(
             fixture_id="F001",
@@ -1394,6 +1395,24 @@ class TestReportAggregatorFlakiness:
         assert result.flakiness is False
         assert result.flaky_fixtures_excluded == []
 
+    def test_skill_variant_flakiness_does_not_move_v1_metrics(self):
+        records = _build_records(
+            ["F001", "F002"], agent_passed=True, baseline_passed=False
+        )
+        records.extend(
+            [
+                _success_record("F001", "skill", 0, passed=True),
+                _success_record("F001", "skill", 1, passed=False),
+                _success_record("F001", "skill", 2, passed=True),
+            ]
+        )
+
+        result = ReportAggregator(records, model_id="claude-sonnet-4-6").aggregate()
+
+        assert result.flakiness is False
+        assert result.agent_recall == 1.0
+        assert result.baseline_recall == 0.0
+
     def test_synthetic_variance_marks_flaky(self):
         # F001 agent variant: pass / fail / pass → variance > 0.
         records = [
@@ -1440,6 +1459,145 @@ class TestReportAggregatorFlakiness:
         # Stable subset: F002 F003 F004, agent always passes → recall = 1.0.
         assert result.agent_recall == 1.0
         assert result.baseline_recall == 0.0
+
+
+def _records_with_flaky_subset(
+    *, total: int, flaky: int, bootstrap_iterations: int = 200
+) -> list:
+    """Build `total` fixtures; the first `flaky` have agent pass-rate variance.
+
+    Stable fixtures: agent passes every run, baseline fails every run.
+    Flaky fixtures: agent run series is pass / fail / pass (variance > 0).
+    Returns just the records; the caller constructs the aggregator so it can
+    pass mode flags.
+    """
+    records: list = []
+    for index in range(total):
+        fid = f"F{index + 1:03d}"
+        is_flaky = index < flaky
+        agent_pass = (
+            [True, False, True] if is_flaky else [True, True, True]
+        )
+        for run_index, passed in enumerate(agent_pass):
+            records.append(_success_record(fid, "agent", run_index, passed=passed))
+            records.append(
+                _success_record(fid, "baseline", run_index, passed=False)
+            )
+    return records
+
+
+class TestFlakyHaltCount:
+    def test_small_n_floor_applies_at_n10(self):
+        # N=10: max(floor(3.0)+1, min(5, 5)) = max(4, 5) = 5.
+        assert _flaky_halt_count(10) == 5
+
+    def test_fraction_governs_at_large_n(self):
+        # N=30: max(floor(9.0)+1, min(5, 15)) = max(10, 5) = 10.
+        # Strict "more than 30%": 9 of 30 is exactly 30% and does NOT halt.
+        assert _flaky_halt_count(30) == 10
+
+    def test_tiny_corpus_floor_is_one(self):
+        # N=2: max(floor(0.6)+1=1, min(5, 1)=1) = 1.
+        assert _flaky_halt_count(2) == 1
+
+    def test_zero_n_returns_zero_inputs_only(self):
+        # N<=0 short-circuits to 0. The aggregator guards N>0 separately.
+        assert _flaky_halt_count(0) == 0
+
+
+class TestReportAggregatorNAwareHalt:
+    def test_four_flaky_of_ten_does_not_halt(self):
+        # N=10, halt count 5. 4 flaky < 5 → continue on the stable subset.
+        records = _records_with_flaky_subset(total=10, flaky=4)
+        result = ReportAggregator(
+            records, model_id="claude-sonnet-4-6", bootstrap_iterations=200
+        ).aggregate()
+        assert result.flakiness is True
+        assert result.halt_due_to_flakiness is False
+        assert result.flaky_halt_threshold_crossed is False
+        assert result.flaky_fixtures_excluded == [
+            "F001",
+            "F002",
+            "F003",
+            "F004",
+        ]
+        # Stable subset is the 6 non-flaky fixtures; agent always passes.
+        assert result.agent_recall == 1.0
+        assert result.baseline_recall == 0.0
+
+    def test_five_flaky_of_ten_halts(self):
+        # N=10, halt count 5. 5 flaky >= 5 → halt.
+        records = _records_with_flaky_subset(total=10, flaky=5)
+        result = ReportAggregator(
+            records, model_id="claude-sonnet-4-6", bootstrap_iterations=200
+        ).aggregate()
+        assert result.flakiness is True
+        assert result.halt_due_to_flakiness is True
+        assert result.flaky_halt_threshold_crossed is True
+        # On halt, flaky fixtures are not excluded; the whole run is invalid.
+        assert result.flaky_fixtures_excluded == []
+
+    def test_large_n_preserves_thirty_percent(self):
+        # N=30, halt count 10. 9 flaky (exactly 30%) → no halt; 10 → halt.
+        no_halt = ReportAggregator(
+            _records_with_flaky_subset(total=30, flaky=9),
+            model_id="claude-sonnet-4-6",
+            bootstrap_iterations=100,
+        ).aggregate()
+        assert no_halt.halt_due_to_flakiness is False
+        assert no_halt.flaky_halt_threshold_crossed is False
+        halted = ReportAggregator(
+            _records_with_flaky_subset(total=30, flaky=10),
+            model_id="claude-sonnet-4-6",
+            bootstrap_iterations=100,
+        ).aggregate()
+        assert halted.halt_due_to_flakiness is True
+        assert halted.flaky_halt_threshold_crossed is True
+
+    def test_flag_and_continue_records_crossing_without_halting(self):
+        # N=10, 5 flaky would halt by default; flag-and-continue suppresses
+        # the halt, excludes the flaky fixtures, and records the crossing.
+        records = _records_with_flaky_subset(total=10, flaky=5)
+        result = ReportAggregator(
+            records,
+            model_id="claude-sonnet-4-6",
+            bootstrap_iterations=200,
+            flag_only_on_flaky_halt=True,
+        ).aggregate()
+        assert result.halt_due_to_flakiness is False
+        assert result.flaky_halt_threshold_crossed is True
+        assert result.flaky_fixtures_excluded == [
+            "F001",
+            "F002",
+            "F003",
+            "F004",
+            "F005",
+        ]
+        # Stable subset is the 5 non-flaky fixtures; agent always passes.
+        assert result.agent_recall == 1.0
+
+    def test_flag_and_continue_crossing_serialized_and_warned(self, tmp_path):
+        # The crossing must survive to report.json and REPORT.md so the
+        # "flag" in flag-and-continue is not lost when the process exits.
+        records = _records_with_flaky_subset(total=10, flaky=5)
+        aggregate = ReportAggregator(
+            records,
+            model_id="claude-sonnet-4-6",
+            bootstrap_iterations=200,
+            flag_only_on_flaky_halt=True,
+        ).aggregate()
+        json_path, md_path = ReportWriter(tmp_path / "reports").write(
+            aggregate=aggregate,
+            run_id="r1",
+            model_id="claude-sonnet-4-6",
+            agent_prompt_sha="a" * 64,
+            baseline_prompt_sha="b" * 64,
+            fixture_set_sha="c" * 64,
+            wall_clock_seconds=10.0,
+        )
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        assert payload["flaky_halt_threshold_crossed"] is True
+        assert "30%" in md_path.read_text(encoding="utf-8")
 
 
 class TestReportAggregatorCost:
@@ -1530,6 +1688,7 @@ class TestReportWriter:
             "flakiness",
             "flaky_fixtures_detected",
             "flaky_fixtures_excluded",
+            "flaky_halt_threshold_crossed",
             "total_tokens_in",
             "total_tokens_out",
             "wall_clock_seconds",
@@ -1623,6 +1782,53 @@ class TestRunnerEndToEndReport:
         payload = json.loads(report_json.read_text(encoding="utf-8"))
         assert payload["schemaVersion"] == 1
         assert payload["recommendation"] is None
+
+    def test_e2e_include_skill_writes_form_factor_report(
+        self, tmp_path, monkeypatch
+    ):
+        self._setup(tmp_path, monkeypatch)
+        skills_dir = tmp_path / ".claude" / "skills" / "security-review"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text("skill prompt", encoding="utf-8")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-e2e-skill")
+        fixtures_dir = tmp_path / "fixtures"
+        fixtures_dir.mkdir()
+        _write_fixture(fixtures_dir, "F001.json", _valid_fixture_payload())
+
+        adapter = _StubAdapter(
+            [
+                APICallResult(
+                    outcome="success",
+                    raw_response="IDENTIFY: clean",
+                    tokens_in=100,
+                    tokens_out=50,
+                    latency_ms=10.0,
+                    error_category=None,
+                    attempts=1,
+                )
+                for _ in range(9)
+            ]
+        )
+        monkeypatch.setattr(cli_mod, "AnthropicAPIAdapter", lambda: adapter)
+        rc = cli_main([
+            "--agent",
+            "security",
+            "--fixtures",
+            str(fixtures_dir),
+            "--n-runs",
+            "3",
+            "--include-skill",
+        ])
+
+        assert rc == 0
+        assert adapter.call_count == 9
+        reports_root = tmp_path / "evals" / "security-spike" / "reports"
+        report_json = next(reports_root.iterdir()) / "report.json"
+        payload = json.loads(report_json.read_text(encoding="utf-8"))
+        assert payload["form_factor"]["agent_baseline_ci_95"]
+        assert payload["form_factor"]["skill_baseline_ci_95"]
+        assert payload["form_factor"]["agent_skill_ci_95"]
+        assert payload["form_factor"]["verdict"]
 
 
 # ===========================================================================
@@ -2099,11 +2305,8 @@ class TestContingencyRerun:
         assert result.flakiness is False
         assert result.flaky_fixtures_excluded == []
 
-    def test_contingency_above_30_pct_halts(self):
-        # 4 of 10 fixtures with ≥2 fail of 5 → 40% flaky → halt=True.
-        records: list = []
-        flaky_ids = {"F001", "F002", "F003", "F004"}
-        for fid in (
+    def _ten_fixture_contingency(self, flaky_ids: set[str]) -> list:
+        all_ids = (
             "F001",
             "F002",
             "F003",
@@ -2114,10 +2317,42 @@ class TestContingencyRerun:
             "F008",
             "F009",
             "F010",
-        ):
+        )
+        records: list = []
+        for fid in all_ids:
             fails = {0, 2} if fid in flaky_ids else set()
             records += _passing_runs(fid, "agent", 5, fail_indices=fails)
             records += _passing_runs(fid, "baseline", 5, fail_indices=set())
+        return records
+
+    def test_contingency_four_of_ten_does_not_halt(self):
+        # Behavior change (Issue #1878): the old fixed 30% fraction halted on
+        # 4 flaky of 10 (40%). The N-aware halt count at N=10 is 5, so 4
+        # flaky no longer halts; the flaky fixtures are excluded and the run
+        # continues on the stable subset.
+        records = self._ten_fixture_contingency(
+            {"F001", "F002", "F003", "F004"}
+        )
+        result = ReportAggregator(
+            records,
+            model_id="claude-sonnet-4-6",
+            bootstrap_iterations=200,
+        ).aggregate()
+        assert result.flakiness is True
+        assert result.halt_due_to_flakiness is False
+        assert result.flaky_halt_threshold_crossed is False
+        assert sorted(result.flaky_fixtures_excluded) == [
+            "F001",
+            "F002",
+            "F003",
+            "F004",
+        ]
+
+    def test_contingency_five_of_ten_halts(self):
+        # N-aware halt count at N=10 is 5; 5 flaky of 10 reaches it → halt.
+        records = self._ten_fixture_contingency(
+            {"F001", "F002", "F003", "F004", "F005"}
+        )
         result = ReportAggregator(
             records,
             model_id="claude-sonnet-4-6",
@@ -2362,7 +2597,7 @@ class TestPerFixtureHaltThreshold:
         assert '"fixtures_with_errors": 1' in captured.err
         assert '"executed_fixtures": 5' in captured.err
         # Per-record values are also logged so operators can correlate; the
-        # per-record fraction here is well below 10% — proving the halt
+        # per-record fraction here is well below 10%, proving the halt
         # fired on the per-fixture rule, not the per-record one.
         assert '"error_count": 1' in captured.err
         assert '"executed_records": 30' in captured.err

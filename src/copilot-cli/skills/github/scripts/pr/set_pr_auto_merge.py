@@ -44,6 +44,7 @@ from github_core.api import (  # noqa: E402
     gh_graphql,
     resolve_repo_params,
 )
+from github_core.placeholder_identity import filter_coauthor_trailers  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # GraphQL queries and mutations
@@ -177,11 +178,17 @@ def enable_auto_merge(
     commit_body: str,
 ) -> int:
     """Enable auto-merge. Returns exit code."""
+    # Issue #2466: strip placeholder Co-authored-by trailers from commit_body
+    # before passing to GitHub. Primary defences are the worktree-bootstrap
+    # reset and pre-push guard; this is the final backstop for the body path.
+    # When commit_body is empty, GitHub auto-assembles from commit subjects,
+    # which are protected by the pre-push guard and worktree-bootstrap reset.
+    sanitized_body = filter_coauthor_trailers(commit_body) if commit_body else ""
     variables: dict = {
         "pullRequestId": pr_id,
         "mergeMethod": merge_method,
         "commitHeadline": commit_headline or "",
-        "commitBody": commit_body or "",
+        "commitBody": sanitized_body,
     }
 
     try:
@@ -192,6 +199,50 @@ def enable_auto_merge(
             error_and_exit(
                 "Auto-merge is not enabled in repository settings. "
                 "Enable it in Settings -> General -> Pull Requests.",
+                3,
+            )
+        # Issue #2439: GitHub refuses auto-merge when
+        # `mergeStateStatus == UNSTABLE` (e.g. a non-required check is
+        # failing). The pr-autofix contract allows merging UNSTABLE PRs
+        # when the failing checks are documented non-required ones, but
+        # the auto-merge path cannot honor that. Direct the caller to
+        # merge_pr.py, which performs an immediate merge and is the
+        # documented fallback for this state.
+        if "unstable status" in msg.lower():
+            strategy = merge_method.lower()
+            fallback = (
+                f"python3 .claude/skills/github/scripts/pr/merge_pr.py "
+                f"--pull-request {pr_number} --strategy {strategy}"
+            )
+            error_and_exit(
+                "Cannot enable auto-merge: PR is in UNSTABLE merge state "
+                "(non-required checks failing). GitHub blocks auto-merge "
+                "for UNSTABLE PRs.\n"
+                "If the failing checks are documented non-required "
+                "failures, merge directly:\n"
+                f"  {fallback}",
+                3,
+            )
+        # Issue #2450: GitHub refuses auto-merge when
+        # `mergeStateStatus == CLEAN` ("Pull request is in clean status").
+        # CLEAN means every required check has passed, every required
+        # review is approved, and there are no conflicts, so auto-merge
+        # has nothing to wait on and is rejected. The correct action is
+        # a direct merge via merge_pr.py. Surface the actionable fallback
+        # instead of leaking the raw GraphQL prefix.
+        if "clean status" in msg.lower():
+            strategy = merge_method.lower()
+            fallback = (
+                f"python3 .claude/skills/github/scripts/pr/merge_pr.py "
+                f"--pull-request {pr_number} --strategy {strategy}"
+            )
+            error_and_exit(
+                "Cannot enable auto-merge: PR is in CLEAN merge state "
+                "(all required checks pass, no pending reviews, no "
+                "conflicts). GitHub blocks auto-merge for CLEAN PRs "
+                "because there is nothing to wait on.\n"
+                "Merge directly:\n"
+                f"  {fallback}",
                 3,
             )
         if "not mergeable" in msg:
